@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+<title>GetSourceCode — 一键获取网站源代码</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">GSC</div>
+      <div>
+        <h1>GetSourceCode</h1>
+        <p class="tagline">基于 Chrome DevTools Protocol 的网站源码 / 网络数据包一键获取工具</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="badge" id="browserBadge" title="当前浏览器">检测中…</span>
+      <button class="icon-btn" id="btnHelp" title="使用说明">?</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：配置面板 -->
+    <section class="panel config">
+      <h2 class="panel-title">抓取配置</h2>
+
+      <label class="field">
+        <span class="label">目标网址 <em>*</em></span>
+        <input type="text" id="url" placeholder="https://example.com" autocomplete="off" spellcheck="false" />
+      </label>
+
+      <label class="field">
+        <span class="label">保存目录 <em>*</em></span>
+        <div class="row">
+          <input type="text" id="outDir" placeholder="选择保存位置…" readonly />
+          <button class="btn" id="btnPickDir">选择</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span class="label">浏览器</span>
+        <div class="row">
+          <select id="browserSelect"></select>
+          <button class="btn" id="btnPickBrowser" title="手动选择浏览器可执行文件">…</button>
+        </div>
+      </label>
+
+      <fieldset class="group">
+        <legend>抓取内容</legend>
+        <label class="check"><input type="checkbox" id="saveSource" checked /><span>源码资源 <small>JS / CSS / 字体</small></span></label>
+        <label class="check"><input type="checkbox" id="saveHar" checked /><span>网络数据包 <small>HAR，可导入 DevTools</small></span></label>
+        <label class="check"><input type="checkbox" id="saveHtml" checked /><span>页面快照 <small>渲染后的 DOM</small></span></label>
+        <label class="check"><input type="checkbox" id="saveMedia" /><span>媒体文件 <small>图片 / 视频 / 音频</small></span></label>
+      </fieldset>
+
+      <fieldset class="group">
+        <legend>高级选项</legend>
+        <label class="check inline">
+          <input type="checkbox" id="headless" checked /><span>无头模式 <small>不显示浏览器窗口</small></span>
+        </label>
+        <div class="grid2">
+          <label class="field-sm"><span>滚动次数</span><input type="number" id="scrollRounds" value="0" min="0" max="50" /></label>
+          <label class="field-sm"><span>额外等待(秒)</span><input type="number" id="extraWait" value="0" min="0" max="120" /></label>
+          <label class="field-sm"><span>超时(秒)</span><input type="number" id="timeout" value="45" min="5" max="600" /></label>
+          <label class="field-sm"><span>单文件上限(MB)</span><input type="number" id="maxFileMB" value="50" min="1" max="2048" /></label>
+        </div>
+        <p class="hint">滚动次数 &gt; 0 可触发懒加载内容（如瀑布流、无限滚动）。慢站点可增大「额外等待」。</p>
+      </fieldset>
+
+      <div class="actions">
+        <button class="btn primary" id="btnStart">开始抓取</button>
+        <button class="btn danger" id="btnAbort" disabled>停止</button>
+      </div>
+    </section>
+
+    <!-- 右：进度与结果 -->
+    <section class="panel result">
+      <div class="tabs">
+        <button class="tab active" data-tab="log">运行日志</button>
+        <button class="tab" data-tab="files">已抓取文件</button>
+        <button class="tab" data-tab="tree">目录结构</button>
+      </div>
+
+      <div class="tabbody">
+        <div class="tabpane active" data-pane="log">
+          <pre id="log" class="log"></pre>
+        </div>
+
+        <div class="tabpane" data-pane="files">
+          <div class="stats" id="stats">
+            <div class="stat"><b id="statSaved">0</b><span>已保存</span></div>
+            <div class="stat"><b id="statBytes">0 B</b><span>总大小</span></div>
+            <div class="stat"><b id="statSkip">0</b><span>跳过</span></div>
+            <div class="stat"><b id="statFail">0</b><span>失败</span></div>
+          </div>
+          <div class="tablewrap">
+            <table class="filetable">
+              <thead><tr><th>类型</th><th>文件</th><th>大小</th><th>来源 URL</th></tr></thead>
+              <tbody id="fileRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="tabpane" data-pane="tree">
+          <div class="treewrap"><div id="tree" class="tree">尚未抓取</div></div>
+        </div>
+      </div>
+
+      <div class="resultbar">
+        <span id="statusText" class="status">就绪</span>
+        <div class="row">
+          <button class="btn" id="btnOpenDir" disabled>打开目录</button>
+          <button class="btn" id="btnCloseBrowser" disabled>关闭浏览器</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 帮助弹窗 -->
+  <div class="modal" id="helpModal">
+    <div class="modal-content">
+      <h3>使用说明</h3>
+      <ol>
+        <li><b>目标网址</b>：要抓取的完整 URL（含 https://）。</li>
+        <li><b>保存目录</b>：抓取结果（源码 / HAR / 快照）保存的位置。</li>
+        <li><b>抓取内容</b>：
+          <ul>
+            <li><b>源码资源</b>：JS、CSS、字体等静态文件，按原目录结构保存。</li>
+            <li><b>网络数据包（HAR）</b>：完整请求/响应记录，可直接拖入 Chrome DevTools 的 Network 面板或 Charles / Fiddler 分析。</li>
+            <li><b>页面快照</b>：JS 执行后的完整 DOM（非原始 HTML）。</li>
+            <li><b>媒体文件</b>：图片 / 视频 / 音频（体积可能较大）。</li>
+          </ul>
+        </li>
+        <li><b>无头模式</b>：勾选则不显示浏览器窗口；遇到需人工登录 / 过验证码的站点可取消勾选。</li>
+        <li><b>滚动次数</b>：对懒加载页面（如瀑布流）设置正向滚动次数以触发更多资源加载。</li>
+      </ol>
+      <h4>输出结构</h4>
+      <pre class="mini">保存目录/
+├── source/&lt;host&gt;/…      JS / CSS / 字体
+├── media/&lt;host&gt;/…       图片 / 视频 / 音频
+├── other/&lt;host&gt;/…       JSON / XML 等
+├── page.html            渲染后 DOM
+├── page-info.json       标题等元信息
+├── network.har          网络数据包
+└── metadata.json        抓取清单</pre>
+      <p class="hint">提示：本工具仅用于合法授权的安全测试、逆向学习与自有站点备份。请遵守目标站点服务条款与当地法律。</p>
+      <button class="btn primary" id="btnCloseHelp">知道了</button>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
