@@ -244,3 +244,94 @@ dist/
 | 事件 | `Network.loadingFinished` | 加载完成 |
 | 事件 | `Network.loadingFailed` | 加载失败 |
 | 事件 | `Network.*ExtraInfo` | 额外头信息 |
+
+---
+
+## 附录 B：浏览器来源与登录态（v1.1 新增）
+
+### B.1 三种浏览器来源
+
+```
+                    BrowserManager.resolveBrowser()
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+   system               bundled                custom
+ (系统已装)         (Chrome for Testing)    (用户指定)
+        │                     │                     │
+   detectBrowsers()   ChromiumDownloader.ensure() 路径校验
+        │                     │
+        │              ┌──────┴──────┐
+        │              ▼             ▼
+        │          镜像源        官方源
+        │      (npmmirror)  (googleapis)
+        │              └──────┬──────┘
+        │                     ▼
+        │            下载 zip → 解压到 userData → 写版本戳
+        ▼
+   可执行文件路径
+```
+
+**关键实现**（`chromium-downloader.js`）：
+
+| 要点 | 做法 | 原因 |
+|------|------|------|
+| 解压目标 | `userData/browser/<platform>/<asset>` | **不能**用 `%TEMP%`：TEMP 下启动会触发 sandbox 0x5 拒绝访问 |
+| 原子落盘 | 先写 `.part`，成功后 `rename` | 避免半包被误认为"已安装" |
+| 版本戳 | `.version` 文件记录版本 | 幂等：已安装直接复用 |
+| 双源回退 | 镜像 → 官方（可配置顺序） | 国区网络适配 |
+| 解压库 | `extract-zip`（纯 JS） | 无原生依赖，跨平台 |
+
+**macOS 陷阱**：可执行文件在 `.app/Contents/MacOS/` 内，**不是**直下 —— `executableRelPath()` 已处理。
+
+### B.2 登录态方案（为何不复用真实 profile）
+
+实测证据（`test/e2e-login.js` 验证）：
+
+| 方案 | 实测结果 | 结论 |
+|------|---------|------|
+| 直接指向用户真实 Chrome profile | Chrome 运行中 → `exit 21 (PROFILE_IN_USE)` | ❌ |
+| 同上（Chrome 已关闭） | Chrome 136+ 对**默认目录**禁用 CDP | ❌ |
+| 运行中强制挂载 | `getAllCookies` 返回 **0 条**，报 EBUSY/0x5 | ❌ |
+| 关闭后复制 profile | 可行，但需复制数百 MB，体验差 | ⚠️ 备选 |
+| **专用 profile + 登录一次** | cookie 跨启动完整保留 | ✅ **采用** |
+
+**专用 profile 布局**：
+
+```
+userData/
+├── profiles/
+│   ├── default/          ← 持久 profile（可登录）
+│   │   └── Default/Network/Cookies
+│   └── work/
+└── browser/              ← 内置浏览器
+    └── win64/chrome-headless-shell/…
+```
+
+- Profile 名经 `sanitizeProfileName()` 安全化，防路径穿越
+- 临时 profile 位于 `os.tmpdir()/gsc-ephemeral-*`，抓完即删（`cleanupEphemeral` 有前缀 + 路径双重校验）
+- Cookie 通过 CDP `Network.getAllCookies` 读取（浏览器已解密），**不触碰** SQLite / DPAPI / ABE
+
+### B.3 中断（abort）语义
+
+`abort()` 在以下检查点触发中断：
+
+```
+启动浏览器前 → 启动后 → 导航前 → 导航后 → 等待空闲后 → 滚动后 → 写盘前
+```
+
+并通过 `_abortPromise()` 让导航等待可被打断。中断时 `run()` 返回 `{ aborted: true, stats, outputDir }`，而非抛错或假成功。
+
+### B.4 原子写与断连检测
+
+- **原子写**：`writeFileAtomic` / `writeBufferAtomic` —— 所有产出先写 `.part` 再 `rename`
+- **断连检测**：`CDPClient` 在 WebSocket close 时发 `disconnected` 事件，`CaptureEngine` 置 `_connectionLost`，最终结果附带 `connectionLost: true`，避免把残缺结果当成功
+
+### B.5 压测数据（并发抓取）
+
+| 并发 | 成功率 | 平均耗时 | 进程峰值 | 结束进程 | 泄漏 | 端口释放 |
+|-----:|-------:|---------:|---------:|---------:|-----:|---------:|
+| 3 | 100% | 13.9s | — | 基线 | **0** | 3/3 |
+| 5 | 100% | 37.3s | 101 | 基线 | **0** | 5/5 |
+
+> 并发 5 呈超线性退化（资源竞争），建议默认并发 ≤ 3。

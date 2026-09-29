@@ -126,12 +126,31 @@ class HarBuilder {
   }
 
   _finalizeTimings(e, endTs) {
-    if (e._ts && endTs) {
-      const send = Math.max(0, ((e._responseTs || e._ts) - e._ts) * 1000);
-      const wait = Math.max(0, ((e._endTs || endTs) - (e._responseTs || e._ts)) * 1000);
-      e.timings = { blocked: -1, dns: -1, connect: -1, send, wait, receive: 0, ssl: -1 };
-      e.time = send + wait;
-    }
+    if (!e._ts || !endTs) return;
+    // HAR 1.2 timings 语义：
+    //   send    = 发出请求耗时（此处近似为 0，CDP 未单列）
+    //   wait    = TTFB：从请求发出到收到响应首字节（responseReceived）
+    //   receive = 从收到响应首字节到响应体接收完毕（loadingFinished）
+    // 注意：send/wait/receive 必须 >= 0（-1 仅允许 blocked/dns/connect/ssl）
+    const reqTs = e._ts;
+    const resTs = e._responseTs || endTs;
+    const finTs = endTs;
+
+    const wait = Math.max(0, (resTs - reqTs) * 1000);
+    const receive = Math.max(0, (finTs - resTs) * 1000);
+    const send = 0;
+
+    e.timings = {
+      blocked: -1,
+      dns: -1,
+      connect: -1,
+      send,
+      wait,
+      receive,
+      ssl: -1,
+    };
+    // HAR 1.2：entry.time 应等于各非 -1 timing 之和
+    e.time = send + wait + receive;
   }
 
   /** 产出 HAR 1.2 对象 */

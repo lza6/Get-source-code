@@ -37,3 +37,7 @@ desktop.ini
 # Environment
 .env
 .env.local
+
+# 测试产物
+test/bench-report.json
+test/soak-report.json

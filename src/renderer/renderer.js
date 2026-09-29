@@ -11,18 +11,20 @@ const state = {
   stats: { saved: 0, bytes: 0, skipped: 0, failed: 0 },
   browsers: [],
   browserPath: null,
+  source: "system",
+  bundledReady: false,
 };
 
 /* ---------------- 初始化 ---------------- */
 async function init() {
   // 默认目录
   try {
-    const d = await window.api.defaultDir();
-    if (d) $("outDir").value = "";
+    await window.api.defaultDir();
   } catch { /* ignore */ }
 
   // 检测浏览器
   await loadBrowsers();
+  await refreshBundledStatus();
 
   // 事件绑定
   $("btnPickDir").onclick = pickDir;
@@ -37,6 +39,24 @@ async function init() {
     if (e.target === $("helpModal")) $("helpModal").classList.remove("open");
   };
 
+  // 浏览器来源切换
+  $("sourceSelect").onchange = () => {
+    state.source = $("sourceSelect").value;
+    $("systemBrowserField").style.display = state.source === "system" ? "" : "none";
+    $("bundledField").style.display = state.source === "bundled" ? "" : "none";
+    if (state.source === "custom") $("systemBrowserField").style.display = "";
+  };
+
+  // 内置浏览器下载
+  $("btnDownloadBrowser").onclick = downloadBrowser;
+
+  // profile 模式
+  $("profileMode").onchange = () => {
+    $("profileNameField").style.display = $("profileMode").value === "persistent" ? "" : "none";
+  };
+  $("btnOpenLogin").onclick = openLogin;
+  $("btnCloseLogin").onclick = closeLogin;
+
   // tabs
   document.querySelectorAll(".tab").forEach((t) => {
     t.onclick = () => {
@@ -49,6 +69,7 @@ async function init() {
 
   // 进度回调
   window.api.onProgress(handleProgress);
+  window.api.onDownloadProgress(handleDownloadProgress);
 
   // 回车即开始
   $("url").addEventListener("keydown", (e) => {
@@ -107,6 +128,10 @@ async function pickBrowser() {
   const p = await window.api.selectBrowser();
   if (p) {
     state.browserPath = p;
+    state.source = "custom";
+    $("sourceSelect").value = "custom";
+    $("systemBrowserField").style.display = "";
+    $("bundledField").style.display = "none";
     const sel = $("browserSelect");
     const opt = document.createElement("option");
     opt.value = p;
@@ -114,6 +139,98 @@ async function pickBrowser() {
     opt.selected = true;
     sel.appendChild(opt);
     setBrowserBadge("自定义", true);
+  }
+}
+
+/* ---------------- 内置浏览器 ---------------- */
+async function refreshBundledStatus() {
+  const asset = $("assetSelect") ? $("assetSelect").value : "chrome";
+  const r = await window.api.bundledStatus(asset);
+  if (r && r.ok && r.installed) {
+    state.bundledReady = true;
+    $("bundledHint").textContent = `已安装 v${r.version}（缓存于应用数据目录）`;
+    $("btnDownloadBrowser").textContent = "重新下载";
+  } else {
+    state.bundledReady = false;
+    $("bundledHint").textContent = "尚未下载。点击「下载」从镜像/官方源获取。";
+    $("btnDownloadBrowser").textContent = "下载";
+  }
+}
+
+async function downloadBrowser() {
+  const asset = $("assetSelect").value;
+  const btn = $("btnDownloadBrowser");
+  btn.disabled = true;
+  $("dlBar").style.display = "";
+  setDlProgress(0, "准备下载…");
+  log("status", `» 开始下载内置浏览器（${asset}）…`);
+  const r = await window.api.downloadBundled({ asset, preferMirror: true });
+  btn.disabled = false;
+  if (r && r.ok) {
+    state.bundledReady = true;
+    log("done", `✔ 内置浏览器就绪 v${r.version}`);
+    $("bundledHint").textContent = `已安装 v${r.version}`;
+    $("btnDownloadBrowser").textContent = "重新下载";
+    setDlProgress(100, "完成");
+    setTimeout(() => { $("dlBar").style.display = "none"; }, 1500);
+  } else {
+    log("err", `✘ 下载失败：${r ? r.error : "未知错误"}`);
+    $("bundledHint").textContent = "下载失败，可在日志查看原因。";
+    setDlProgress(0, "失败");
+  }
+}
+
+function handleDownloadProgress(p) {
+  if (!p) return;
+  if (p.phase === "download") {
+    setDlProgress(p.percent || 0, p.message || "下载中…");
+  } else if (p.phase === "extract") {
+    setDlProgress(100, "解压中…");
+  } else if (p.phase === "ready") {
+    setDlProgress(100, p.message || "就绪");
+  } else if (p.phase === "error") {
+    setDlProgress(0, p.message || "错误");
+  } else if (p.message) {
+    setDlProgress(0, p.message);
+  }
+}
+
+function setDlProgress(pct, text) {
+  const fill = $("dlFill");
+  if (fill) fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  if (text && $("bundledHint")) $("bundledHint").textContent = text;
+}
+
+/* ---------------- 登录态 ---------------- */
+async function openLogin() {
+  const url = normalizeUrl($("url").value) || "about:blank";
+  const profileName = $("profileName").value.trim() || "default";
+  $("profileMode").value = "persistent";
+  $("profileNameField").style.display = "";
+  log("status", `» 正在打开登录窗口（profile: ${profileName}）…`);
+  const r = await window.api.openLoginWindow({
+    profileName,
+    url,
+    source: state.source,
+    executablePath: state.browserPath,
+    asset: $("assetSelect") ? $("assetSelect").value : "chrome",
+  });
+  if (r && r.ok) {
+    log("done", `✔ 登录窗口已打开（端口 ${r.port}）。请在窗口中完成登录，然后点「关闭登录窗口」。`);
+    setStatus("请在浏览器窗口登录，完成后关闭窗口", null);
+  } else {
+    log("err", `✘ 打开登录窗口失败：${r ? r.error : "未知错误"}`);
+  }
+}
+
+async function closeLogin() {
+  const profileName = $("profileName").value.trim() || "default";
+  const r = await window.api.closeLoginWindow(profileName);
+  if (r && r.ok) {
+    log("done", "✔ 登录窗口已关闭，登录态已保存在该 profile。");
+    setStatus("登录态已保存，可开始抓取", true);
+  } else {
+    log("skip", "没有可关闭的登录窗口。");
   }
 }
 
@@ -130,7 +247,11 @@ async function start() {
   const outDir = $("outDir").value.trim();
   if (!url) return setStatus("请填写目标网址", false);
   if (!outDir) return setStatus("请选择保存目录", false);
-  if (!state.browserPath) return setStatus("未选择浏览器", false);
+
+  const source = $("sourceSelect").value;
+  if (source === "system" && !state.browserPath) return setStatus("未检测到系统浏览器，请改用「内置浏览器」", false);
+  if (source === "bundled" && !state.bundledReady) return setStatus("内置浏览器尚未下载，请先点击「下载」", false);
+  if (source === "custom" && !state.browserPath) return setStatus("请选择自定义浏览器可执行文件", false);
 
   // 重置
   state.running = true;
@@ -146,7 +267,12 @@ async function start() {
   const opts = {
     targetUrl: url,
     outputDir: outDir,
-    executablePath: state.browserPath,
+    source,
+    executablePath: source === "custom" || source === "system" ? state.browserPath : undefined,
+    asset: $("assetSelect") ? $("assetSelect").value : "chrome",
+    preferMirror: true,
+    profileMode: $("profileMode").value,
+    profileName: $("profileName").value.trim() || "default",
     headless: $("headless").checked,
     saveSource: $("saveSource").checked,
     saveHar: $("saveHar").checked,
@@ -162,14 +288,18 @@ async function start() {
   state.running = false;
   toggleRunning(false);
 
-  if (res.ok) {
+  if (res.ok && res.aborted) {
+    setStatus(`已中止（已保存 ${state.stats.saved} 个文件）`, null);
+    log("skip", `⚑ 抓取已被用户中止`);
+    if (res.outputDir) { state.lastDir = res.outputDir; $("btnOpenDir").disabled = false; await loadTree(res.outputDir); }
+  } else if (res.ok) {
     state.lastDir = res.outputDir;
     $("btnOpenDir").disabled = false;
     $("btnCloseBrowser").disabled = false;
     setStatus(`完成：保存 ${state.stats.saved} 个文件`, true);
     log("done", `✔ 抓取完成 → ${res.outputDir}`);
+    if (res.connectionLost) log("err", "⚠ 浏览器中途断连，结果可能不完整");
     await loadTree(res.outputDir);
-    // 切到文件页
     document.querySelector('.tab[data-tab="files"]').click();
   } else {
     setStatus(`失败：${res.error}`, false);
@@ -226,6 +356,12 @@ function handleProgress(p) {
       state.stats.skipped++;
       updateStats();
       log("skip", `∅ 跳过 ${trunc(p.url || "", 70)} — ${p.reason}`);
+      break;
+    case "aborted":
+      log("skip", "⚑ " + (p.message || "已中止"));
+      break;
+    case "warning":
+      log("err", "⚠ " + (p.message || ""));
       break;
     case "done":
       break;

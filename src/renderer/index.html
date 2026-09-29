@@ -40,12 +40,59 @@
       </label>
 
       <label class="field">
-        <span class="label">浏览器</span>
+        <span class="label">浏览器来源</span>
+        <select id="sourceSelect">
+          <option value="system">系统已安装浏览器（推荐）</option>
+          <option value="bundled">内置浏览器（无浏览器时下载）</option>
+          <option value="custom">自定义可执行文件</option>
+        </select>
+      </label>
+
+      <div class="field" id="systemBrowserField">
+        <span class="label">选择浏览器</span>
         <div class="row">
           <select id="browserSelect"></select>
           <button class="btn" id="btnPickBrowser" title="手动选择浏览器可执行文件">…</button>
         </div>
-      </label>
+      </div>
+
+      <div class="field" id="bundledField" style="display:none">
+        <span class="label">内置浏览器</span>
+        <div class="row">
+          <select id="assetSelect">
+            <option value="chrome">完整 Chrome（支持登录窗口）</option>
+            <option value="chrome-headless-shell">Headless Shell（体积小）</option>
+          </select>
+          <button class="btn" id="btnDownloadBrowser">下载</button>
+        </div>
+        <div class="dlbar" id="dlBar" style="display:none">
+          <div class="dlbar-fill" id="dlFill"></div>
+        </div>
+        <p class="hint" id="bundledHint">尚未下载。点击「下载」从镜像/官方源获取。</p>
+      </div>
+
+      <fieldset class="group">
+        <legend>登录态（抓取需登录的网站）</legend>
+        <label class="field-sm" style="margin-bottom:8px">
+          <span>Profile 模式</span>
+          <select id="profileMode">
+            <option value="ephemeral">临时（不留登录态，抓完即弃）</option>
+            <option value="persistent">持久（保留登录态，可复用）</option>
+          </select>
+        </label>
+        <label class="field-sm" id="profileNameField" style="display:none;margin-bottom:8px">
+          <span>Profile 名称</span>
+          <input type="text" id="profileName" value="default" placeholder="default" />
+        </label>
+        <div class="row">
+          <button class="btn" id="btnOpenLogin">打开登录窗口</button>
+          <button class="btn" id="btnCloseLogin">关闭登录窗口</button>
+        </div>
+        <p class="hint" id="profileHint">
+          需要登录的站点：先切到「持久」模式 → 打开登录窗口 → 在浏览器里登录 → 关闭窗口 → 开始抓取。
+          工具使用独立 profile，不会读取或影响你的日常浏览器数据。
+        </p>
+      </fieldset>
 
       <fieldset class="group">
         <legend>抓取内容</legend>

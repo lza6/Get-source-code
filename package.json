@@ -1,7 +1,7 @@
 {
   "name": "get-source-code",
   "productName": "GetSourceCode",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "一键获取目标网站的源代码、网络数据包(HAR)与媒体资源的可视化工具（基于 Chrome DevTools Protocol）",
   "main": "src/main/main.js",
   "author": "lza6",
@@ -23,10 +23,18 @@
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable",
     "build:dir": "electron-builder --dir",
-    "test": "node test/run-capture.js",
+    "test": "node test/test.js",
+    "test:e2e": "node test/test.js && node test/e2e-login.js",
+    "test:login": "node test/e2e-login.js",
+    "test:combo": "node test/e2e-combo.js",
+    "bench": "node test/bench.js 3",
+    "bench:5": "node test/bench.js 5",
+    "soak": "node test/soak.js 8",
+    "capture": "node test/run-capture.js",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "extract-zip": "^2.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -48,8 +56,18 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.ico"
     },

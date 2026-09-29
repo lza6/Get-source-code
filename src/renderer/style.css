@@ -139,6 +139,17 @@ input::placeholder { color: var(--text-dim2); }
 .field-sm input { padding: 6px 8px; font-size: 12px; }
 .hint { font-size: 11px; color: var(--text-dim2); margin-top: 8px; line-height: 1.6; }
 
+/* 下载进度条 */
+.dlbar {
+  height: 6px; background: var(--bg-3); border-radius: 3px;
+  overflow: hidden; margin-top: 10px;
+}
+.dlbar-fill {
+  height: 100%; width: 0%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--purple));
+  transition: width .3s ease;
+}
+
 /* ---------- 右栏 tabs ---------- */
 .tabs { display: flex; gap: 2px; padding: 10px 12px 0; background: var(--bg-2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .tab {

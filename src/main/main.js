@@ -9,11 +9,24 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { CaptureEngine } = require("../core/capture-engine");
 const { detectBrowsers } = require("../core/browser-launcher");
+const { BrowserManager } = require("../core/browser-manager");
+const { ChromiumDownloader } = require("../core/chromium-downloader");
 
 let mainWindow = null;
 let currentEngine = null;
+let browserManager = null;
+const loginLaunchers = new Map();  // profileName -> BrowserLauncher（登录窗口）
+
+/** 惰性初始化 BrowserManager（需要 app ready） */
+function getBrowserManager() {
+  if (!browserManager) {
+    browserManager = new BrowserManager({ userDataDir: app.getPath("userData") });
+  }
+  return browserManager;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -48,7 +61,20 @@ app.on("window-all-closed", () => {
     currentEngine.abort();
     currentEngine.shutdown().catch(() => {});
   }
+  for (const launcher of loginLaunchers.values()) {
+    launcher.close().catch(() => {});
+  }
   if (process.platform !== "darwin") app.quit();
+});
+
+/** 退出前清理：防止浏览器孤儿进程 */
+app.on("before-quit", () => {
+  try {
+    if (currentEngine) currentEngine.abort();
+  } catch { /* ignore */ }
+  for (const launcher of loginLaunchers.values()) {
+    try { launcher.close(); } catch { /* ignore */ }
+  }
 });
 
 /* ---------------- IPC ---------------- */
@@ -57,6 +83,124 @@ app.on("window-all-closed", () => {
 ipcMain.handle("browsers:detect", () => {
   const list = detectBrowsers();
   return list.map((b) => ({ name: b.name, path: b.path }));
+});
+
+/** 列出所有浏览器来源（系统 + 内置状态） */
+ipcMain.handle("browsers:sources", () => {
+  try {
+    return { ok: true, ...getBrowserManager().listSources() };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 内置浏览器状态 */
+ipcMain.handle("browsers:bundledStatus", (_e, asset) => {
+  try {
+    const dl = new ChromiumDownloader({ baseDir: getBrowserManager().browserDir, asset: asset || "chrome" });
+    return { ok: true, ...dl.status() };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 下载内置浏览器（带进度推送） */
+ipcMain.handle("browsers:download", async (event, opts) => {
+  const send = (payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("browser:download", payload);
+  };
+  try {
+    const dl = new ChromiumDownloader({
+      baseDir: getBrowserManager().browserDir,
+      asset: (opts && opts.asset) || "chrome",
+      preferMirror: !(opts && opts.preferMirror === false),
+      onProgress: (p) => send(p),
+    });
+    const r = await dl.ensure();
+    return { ok: true, exe: r.exe, version: r.version };
+  } catch (e) {
+    send({ phase: "error", message: e.message });
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 删除内置浏览器 */
+ipcMain.handle("browsers:removeBundled", (_e, asset) => {
+  try {
+    const dl = new ChromiumDownloader({ baseDir: getBrowserManager().browserDir, asset: asset || "chrome" });
+    return { ok: dl.remove() };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 持久 profile 列表 */
+ipcMain.handle("profiles:list", () => {
+  try {
+    return { ok: true, profiles: getBrowserManager().listProfiles() };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 持久 profile 状态 */
+ipcMain.handle("profiles:status", (_e, name) => {
+  try {
+    return { ok: true, ...getBrowserManager().profileStatus(name) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 删除持久 profile */
+ipcMain.handle("profiles:remove", (_e, name) => {
+  try {
+    return { ok: getBrowserManager().removeProfile(name) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/**
+ * 打开「登录窗口」：用指定 profile 启动可见浏览器，让用户登录一次
+ * 返回后 cookie 持久化在该 profile，之后抓取可带登录态
+ */
+ipcMain.handle("profiles:openLogin", async (_e, opts) => {
+  try {
+    const bm = getBrowserManager();
+    const { profileName, url, source, executablePath, asset } = opts || {};
+    const browser = await bm.resolveBrowser({ source: source || "system", executablePath, asset });
+    const profile = bm.resolveProfile({ profileMode: "persistent", profileName });
+
+    const { BrowserLauncher } = require("../core/browser-launcher");
+    const launcher = new BrowserLauncher({
+      executablePath: browser.exe,
+      port: (opts && opts.port) || 9444,
+      headless: false, // 登录必须可见
+      userDataDir: profile.dir,
+    });
+    await launcher.launch();
+    // 在新标签打开目标站点，供用户登录
+    if (url) {
+      try { await launcher.newTab(url); } catch { /* ignore */ }
+    }
+    loginLaunchers.set(profileName || "default", launcher);
+    return { ok: true, profileDir: profile.dir, browser: browser.exe, port: launcher.port };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 关闭登录窗口 */
+ipcMain.handle("profiles:closeLogin", async (_e, name) => {
+  const key = name || "default";
+  const launcher = loginLaunchers.get(key);
+  if (launcher) {
+    await launcher.close().catch(() => {});
+    loginLaunchers.delete(key);
+    return { ok: true };
+  }
+  return { ok: false, error: "未找到登录窗口" };
 });
 
 /** 选择保存目录 */
@@ -113,21 +257,57 @@ ipcMain.handle("capture:start", async (event, opts) => {
     }
   };
 
-  const engine = new CaptureEngine({
-    ...opts,
-    onProgress: (p) => send(p),
-  });
-  currentEngine = engine;
-
+  const bm = getBrowserManager();
+  let profile = null;
   try {
-    const result = await engine.run();
-    return { ok: true, ...result };
+    // 1) 解析浏览器（可能触发内置浏览器下载）
+    const browser = await bm.resolveBrowser({
+      source: opts.source || "system",
+      executablePath: opts.executablePath,
+      asset: opts.asset,
+      preferMirror: opts.preferMirror,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("browser:download", p);
+      },
+    });
+
+    // 2) 解析 profile
+    profile = bm.resolveProfile({
+      profileMode: opts.profileMode || "ephemeral",
+      profileName: opts.profileName,
+    });
+
+    if (opts.onBrowserResolved) opts.onBrowserResolved(browser);
+
+    const engine = new CaptureEngine({
+      ...opts,
+      executablePath: browser.exe,
+      userDataDir: profile.dir,
+      onProgress: (p) => send(p),
+    });
+    // 记录临时 profile，供 shutdown 清理
+    if (profile.ephemeral) {
+      engine._ephemeralProfile = profile.dir;
+      engine._ownsProfile = true;
+    }
+    currentEngine = engine;
+
+    try {
+      const result = await engine.run();
+      return { ok: true, ...result, browser: { source: browser.source, version: browser.version } };
+    } finally {
+      await engine.cleanup().catch(() => {});
+      currentEngine = null;
+      // 临时 profile 清理
+      if (profile && profile.ephemeral) {
+        bm.cleanupEphemeral(profile.dir);
+      }
+    }
   } catch (err) {
     send({ type: "error", message: err.message });
-    return { ok: false, error: err.message };
-  } finally {
-    await engine.cleanup().catch(() => {});
+    if (profile && profile.ephemeral) bm.cleanupEphemeral(profile.dir);
     currentEngine = null;
+    return { ok: false, error: err.message };
   }
 });
 

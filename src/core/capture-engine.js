@@ -29,6 +29,9 @@ const DEFAULT_OPTS = {
   maxResourceSize: 50 * 1024 * 1024, // 单文件上限（默认 50MB）
   maxTotalSize: 500 * 1024 * 1024,   // 总上限（默认 500MB）
   extraWait: 0,            // 额外等待（用户可调，应对慢站点）
+  userDataDir: null,       // 浏览器 profile 目录（由 BrowserManager 解析）
+  executablePath: null,    // 浏览器可执行文件
+  onBrowserResolved: null, // 回调：浏览器解析完成（用于 UI 显示）
 };
 
 class CaptureEngine {
@@ -44,6 +47,9 @@ class CaptureEngine {
     this.requestMap = new Map(); // requestId -> requestInfo
     this.stats = { saved: 0, failed: 0, skipped: 0, bytes: 0 };
     this._aborted = false;
+    this._ephemeralProfile = null; // 临时 profile 路径
+    this._ownsProfile = false;     // 是否由本引擎创建（可安全删除）
+    this._connectionLost = false;  // 浏览器是否断连
   }
 
   _emit(type, payload) {
@@ -59,6 +65,24 @@ class CaptureEngine {
   /** 停止抓取 */
   abort() {
     this._aborted = true;
+    // 通知正在等待的 CDP 事件，避免 run() 卡在 waitFor 上
+    try {
+      if (this.cdp && this.cdp.connected && this.sessionId) {
+        // 中断可能挂起的导航等待
+        this.cdp.send("Page.stopLoading", {}, { sessionId: this.sessionId, timeout: 3000 }).catch(() => {});
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** 检查点：已中止则抛出，由 run() 捕获并返回 aborted 结果 */
+  _checkAbort(stage) {
+    if (this._aborted) {
+      const err = new Error(`用户已中止（${stage}）`);
+      err.aborted = true;
+      throw err;
+    }
   }
 
   async run() {
@@ -66,6 +90,20 @@ class CaptureEngine {
     if (!targetUrl) throw new Error("缺少目标网址");
     if (!outputDir) throw new Error("缺少保存目录");
     fs.mkdirSync(outputDir, { recursive: true });
+
+    try {
+      return await this._runInternal();
+    } catch (err) {
+      if (err && err.aborted) {
+        this._emit("aborted", { message: err.message, stats: this.stats });
+        return { aborted: true, stats: this.stats, outputDir };
+      }
+      throw err;
+    }
+  }
+
+  async _runInternal() {
+    const { targetUrl, outputDir } = this.opts;
 
     // 1) 启动浏览器
     this._emit("status", { message: "正在启动浏览器…" });
@@ -75,8 +113,10 @@ class CaptureEngine {
       headless: this.opts.headless,
       userDataDir: this.opts.userDataDir,
     });
+    this._checkAbort("启动浏览器前");
     const { version, reused } = await this.launcher.launch();
     this._emit("status", { message: reused ? "复用已运行的浏览器" : "浏览器已启动", browser: version.Browser });
+    this._checkAbort("启动浏览器后");
 
     // 2) 连接 CDP
     this.cdp = new CDPClient(version.webSocketDebuggerUrl, { onEvent: (e) => this._onCdpEvent(e) });
@@ -101,41 +141,51 @@ class CaptureEngine {
       mobile: false,
     }, { sessionId }).catch(() => {});
 
-    // 5) 导航
+    // 5) 导航（可被 abort 打断：waitFor 与 abortPromise 赛跑）
+    this._checkAbort("导航前");
     this._emit("status", { message: `正在访问 ${targetUrl} …` });
     const loadPromise = this.cdp.waitFor("Page.loadEventFired", { sessionId, timeout: this.opts.timeout }).catch(() => null);
     await this.cdp.send("Page.navigate", { url: targetUrl }, { sessionId });
-    await loadPromise;
+    const abortWait = this._abortPromise();
+    try {
+      await Promise.race([loadPromise, abortWait.promise]);
+    } finally {
+      abortWait.stop();   // 防止定时器链泄漏
+    }
+    this._checkAbort("导航后");
 
     // 6) 等待网络空闲
     await this._waitNetworkIdle();
+    this._checkAbort("等待空闲后");
 
     // 7) 滚动触发懒加载
     if (this.opts.scrollRounds > 0) {
       this._emit("status", { message: "滚动页面触发懒加载…" });
       await this._scrollPage(this.opts.scrollRounds, this.opts.scrollDelay);
+      this._checkAbort("滚动后");
       await this._waitNetworkIdle();
     }
 
     // 8) 额外等待（用户设定，应对慢站点/延迟请求）
     if (this.opts.extraWait > 0) {
       this._emit("status", { message: `额外等待 ${(this.opts.extraWait / 1000).toFixed(1)} 秒…` });
-      await new Promise((r) => setTimeout(r, this.opts.extraWait));
+      await this._sleepInterruptible(this.opts.extraWait);
     }
+    this._checkAbort("写盘前");
 
     // 9) 保存渲染后 DOM
-    if (this.opts.saveHtml && !this._aborted) {
+    if (this.opts.saveHtml) {
       await this._saveRenderedHtml();
     }
 
-    // 10) 写 HAR
+    // 10) 写 HAR（原子落盘）
     if (this.opts.saveHar) {
       const harPath = path.join(outputDir, "network.har");
-      fs.writeFileSync(harPath, JSON.stringify(this.har.build(), null, 2), "utf8");
+      writeFileAtomic(harPath, JSON.stringify(this.har.build(), null, 2));
       this._emit("file", { kind: "har", path: harPath });
     }
 
-    // 11) 写清单
+    // 11) 写清单（原子落盘）
     const metaPath = path.join(outputDir, "metadata.json");
     const meta = {
       tool: "GetSourceCode",
@@ -147,15 +197,65 @@ class CaptureEngine {
       resources: this.resources,
       tree: buildTree(this.resources, outputDir),
     };
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+    writeFileAtomic(metaPath, JSON.stringify(meta, null, 2));
     this._emit("file", { kind: "metadata", path: metaPath });
 
+    // 若浏览器中途断连，明确告知（避免"假成功"）
+    if (this._connectionLost) {
+      this._emit("warning", { message: "浏览器在抓取过程中断开连接，结果可能不完整" });
+    }
+
     this._emit("done", { stats: this.stats, outputDir });
-    return { stats: this.stats, outputDir };
+    return { stats: this.stats, outputDir, connectionLost: this._connectionLost };
+  }
+
+  /**
+   * 返回一个在 abort 时 resolve 的 Promise，并在 race 结束后可主动停止轮询。
+   * @returns {{ promise: Promise<string>, stop: () => void }}
+   */
+  _abortPromise() {
+    let timer = null;
+    let stopped = false;
+    const promise = new Promise((resolve) => {
+      const tick = () => {
+        if (stopped) return;
+        if (this._aborted) return resolve("aborted");
+        timer = setTimeout(tick, 150);
+      };
+      tick();
+    });
+    return {
+      promise,
+      stop: () => {
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      },
+    };
+  }
+
+  /** 可被 abort 打断的 sleep */
+  _sleepInterruptible(ms) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        if (this._aborted || Date.now() - start >= ms) return resolve();
+        setTimeout(tick, Math.min(200, ms));
+      };
+      tick();
+    });
   }
 
   /** CDP 事件处理 */
   async _onCdpEvent(evt) {
+    // 浏览器断连：置位，让 run() 判定为失败而非"成功"
+    if (evt.type === "disconnected") {
+      this._connectionLost = true;
+      this._emit("status", { message: "浏览器连接已断开" });
+      return;
+    }
     if (evt.type !== "event") return;
     const { method, params, sessionId } = evt;
     if (sessionId && this.sessionId && sessionId !== this.sessionId) return;
@@ -220,7 +320,7 @@ class CaptureEngine {
       const rel = buildLocalPath(url, cls, this.opts.targetUrl);
       const abs = path.join(this.opts.outputDir, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, buf);
+      writeBufferAtomic(abs, buf);
 
       this.stats.saved++;
       this.stats.bytes += buf.length;
@@ -262,7 +362,7 @@ class CaptureEngine {
       }, { sessionId: this.sessionId });
       const html = res.result?.value || "";
       const file = path.join(this.opts.outputDir, "page.html");
-      fs.writeFileSync(file, html, "utf8");
+      writeFileAtomic(file, html);
       this.resources.push({ url: this.opts.targetUrl, kind: "html", size: Buffer.byteLength(html), file: "page.html", status: 200 });
       this._emit("file", { kind: "html", size: html.length, path: file });
 
@@ -272,7 +372,7 @@ class CaptureEngine {
         returnByValue: true,
       }, { sessionId: this.sessionId }).catch(() => null);
       if (info?.result?.value) {
-        fs.writeFileSync(path.join(this.opts.outputDir, "page-info.json"), info.result.value, "utf8");
+        writeFileAtomic(path.join(this.opts.outputDir, "page-info.json"), info.result.value);
       }
     } catch (e) {
       this._emit("skip", { url: "page.html", reason: `DOM 导出失败: ${e.message}` });
@@ -316,9 +416,48 @@ class CaptureEngine {
     // 注意：不主动关闭浏览器，方便用户复用/查看；由 UI 决定是否关闭
   }
 
-  async shutdown() {
+  /**
+   * 关闭浏览器并清理临时资源
+   * @param {object} [opts]
+   * @param {boolean} [opts.removeEphemeralProfile] 是否删除临时 profile（默认 true）
+   */
+  async shutdown(opts = {}) {
     await this.cleanup();
     if (this.launcher) await this.launcher.close();
+    // 清理临时 profile（仅当由本次运行创建且未被复用）
+    if (opts.removeEphemeralProfile !== false && this._ephemeralProfile && this._ownsProfile) {
+      try {
+        fs.rmSync(this._ephemeralProfile, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * 原子写文件：先写 .part，成功后 rename，避免磁盘满/崩溃留下半截文件
+ */
+function writeFileAtomic(file, data) {
+  const part = file + ".part";
+  try {
+    fs.writeFileSync(part, data);
+    fs.renameSync(part, file);
+  } catch (e) {
+    try { fs.rmSync(part, { force: true }); } catch { /* ignore */ }
+    throw e;
+  }
+}
+
+/** 原子写二进制（用于资源文件） */
+function writeBufferAtomic(file, buf) {
+  const part = file + ".part";
+  try {
+    fs.writeFileSync(part, buf);
+    fs.renameSync(part, file);
+  } catch (e) {
+    try { fs.rmSync(part, { force: true }); } catch { /* ignore */ }
+    throw e;
   }
 }
 
@@ -342,4 +481,4 @@ function buildTree(resources, rootDir) {
   return tree;
 }
 
-module.exports = { CaptureEngine, DEFAULT_OPTS };
+module.exports = { CaptureEngine, DEFAULT_OPTS, writeFileAtomic, writeBufferAtomic };
