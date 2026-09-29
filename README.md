@@ -1,6 +1,6 @@
 # GetSourceCode
 
-> 一键获取目标网站的**源代码**、**网络数据包（HAR）**、**页面快照**与**媒体资源**的可视化桌面工具。
+> 一键获取目标网站的**源代码信息**、**网络数据包（HAR）**、**页面快照**与**媒体资源**，方便进行逆向、二次开发与安全分析。
 > 基于 **Chrome DevTools Protocol (CDP)** —— 让开发者不再需要手动 F12 逐条另存。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
