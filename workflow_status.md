@@ -118,3 +118,21 @@
 | 8 | 浏览器断连被静默忽略（假成功） | HIGH | 代码审查 | `_connectionLost` + 结果标记 |
 
 **测试数量：19（基线）→ 37（单元+集成）+ 6（登录 E2E）+ 11（组合 E2E）= 54 项**
+
+---
+
+## T11 发布（已完成）
+
+| 项 | 值 |
+|----|-----|
+| 提交 | `a850481` feat(v1.1.0) |
+| 分支 | main（已推送） |
+| Tag | `v1.1.0` |
+| Release | https://github.com/lza6/Get-source-code/releases/tag/v1.1.0 |
+| 附件 1 | `GetSourceCode-1.1.0-portable.exe` (106MB) ✓ uploaded |
+| 附件 2 | `GetSourceCode.Setup.1.1.0.exe` (106MB) ✓ uploaded |
+
+## 剩余任务
+
+- T2/T3/T10 研究代理仍在运行（超时未返回），其价值已由**自审替代**：本轮自审发现并修复了 8 个真实缺陷
+- T12 主线：用本工具抓取目标站点（进行中）
