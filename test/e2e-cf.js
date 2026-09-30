@@ -135,6 +135,51 @@ function check(name, cond, ev) {
   check("abort 后等待立即返回 false", passed === false, `passed=${passed}`);
   check("未等到超时（<5s）", elapsed < 5000, `${elapsed}ms`);
 
+  /* ---------- 5. 失败路径：建议生成（R4） ---------- */
+  console.log("\n[5] 过盾失败时的处置建议（R4 可观测性）");
+  const { CF_TYPE } = require("../src/core/cf-detector");
+  for (const t of [CF_TYPE.TURNSTILE, CF_TYPE.MANAGED, CF_TYPE.JSD, CF_TYPE.BLOCK]) {
+    const steps = engine2._buildCfNextSteps(t);
+    const ok = Array.isArray(steps) && steps.length >= 2;
+    check(`${t} 类型有 ≥2 条建议`, ok, ok ? steps[0].slice(0, 46) + "…" : JSON.stringify(steps));
+  }
+  const tSteps = engine2._buildCfNextSteps(CF_TYPE.TURNSTILE);
+  check("Turnstile 建议指向「允许自动触发」开关",
+    tSteps.some((s) => /Turnstile/.test(s)), "");
+  check("Managed 建议包含「关闭无头模式」",
+    engine2._buildCfNextSteps(CF_TYPE.MANAGED).some((s) => /无头/.test(s)), "");
+  check("所有类型都建议「更换出口 IP」（CF 绑定 IP，最有效手段）",
+    [CF_TYPE.TURNSTILE, CF_TYPE.MANAGED, CF_TYPE.JSD].every(
+      (t) => engine2._buildCfNextSteps(t).some((s) => /网络出口|换 IP/.test(s))
+    ), "");
+
+  /* ---------- 6. 真实失败路径：短超时下挑战必然超时 ---------- */
+  console.log("\n[6] 真实失败路径（超时 → 产出建议而非静默）");
+  engine2.opts.cfChallengeTimeout = 1500;
+  const events = [];
+  engine2.opts.onProgress = (p) => events.push(p);
+  // 伪造一个必然被判定为挑战的场景：直接调用内部流程
+  const origProbe = engine2._probeChallenge.bind(engine2);
+  engine2._probeChallenge = async () => ({
+    headers: { "cf-mitigated": "challenge" },
+    title: "Just a moment...",
+    html: '<script src="/cdn-cgi/challenge-platform/x"></script>',
+  });
+  await engine2._handleChallenge();
+  engine2._probeChallenge = origProbe;
+
+  const failedEvt = events.find((e) => e.type === "cf:failed");
+  check("超时后发出 cf:failed 事件（而非静默成功）", !!failedEvt,
+    failedEvt ? failedEvt.message : "未发出事件");
+  check("失败事件携带 nextSteps 供 UI 展示",
+    !!(failedEvt && Array.isArray(failedEvt.nextSteps) && failedEvt.nextSteps.length),
+    failedEvt ? `${failedEvt.nextSteps.length} 条建议` : "");
+  check("cfReport 记录了尝试与原因",
+    engine2._cfReport && engine2._cfReport.attempts.length > 0 && engine2._cfReport.reason === "timeout",
+    JSON.stringify({ attempts: engine2._cfReport?.attempts, reason: engine2._cfReport?.reason }));
+  check("cfReport 未被标记为已通过（不谎报成功）",
+    engine2._cfReport.passed === false, `passed=${engine2._cfReport.passed}`);
+
   cdp.close();
   await launcher.close();
 

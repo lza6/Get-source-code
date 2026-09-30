@@ -146,6 +146,39 @@ function check(name, cond, ev) {
     check("cfAutoPass 可被读取", typeof opts.cfAutoPass === "boolean");
     check("cfChallengeTimeout 换算为毫秒", opts.cfChallengeTimeout === 30000, `${opts.cfChallengeTimeout}ms`);
 
+    /* ---------- 6. CF 状态反馈（回归：事件名曾被 payload.type 覆盖） ---------- */
+    console.log("\n[3d] CF 事件在 UI 上的真实反馈");
+    // 直接向渲染层派发主进程会发送的事件，验证 handleProgress 各分支确实被命中
+    const cfFeedback = await evalJs(`
+      (function(){
+        document.getElementById('log').innerHTML = '';
+        window.api.__testDispatch([
+          { type: 'cf:detected', challengeType: 'managed', evidence: ['header:cf-mitigated=challenge'] },
+          { type: 'cf:failed', challengeType: 'managed', message: '未通过', nextSteps: ['换出口 IP','稍后重试'] }
+        ]);
+        var txt = document.getElementById('log').textContent;
+        return JSON.stringify({
+          hasDetected: txt.indexOf('检测到 Cloudflare 挑战') >= 0,
+          hasEvidence: txt.indexOf('cf-mitigated') >= 0,
+          hasFailed: txt.indexOf('未通过') >= 0,
+          hasNextSteps: txt.indexOf('换出口 IP') >= 0 && txt.indexOf('稍后重试') >= 0,
+          status: document.getElementById('statusText').textContent
+        });
+      })()
+    `);
+    const cf = JSON.parse(cfFeedback);
+    check("cf:detected 在日志中有反馈", cf.hasDetected);
+    check("cf:detected 显示了判定证据", cf.hasEvidence);
+    check("cf:failed 在日志中有反馈", cf.hasFailed);
+    check("cf:failed 展示了处置建议（nextSteps）", cf.hasNextSteps);
+    check("失败后状态栏有明确提示", /未通过|不完整/.test(cf.status), cf.status);
+
+    /* ---------- 7. 主进程 → 渲染层 链路真实存在 ---------- */
+    console.log("\n[3e] 事件链路（preload 契约）");
+    check("preload 暴露了 onProgress", await evalJs("typeof window.api.onProgress === 'function'"));
+    check("preload 暴露了 __testDispatch（测试注入通道）",
+      await evalJs("typeof window.api.__testDispatch === 'function'"));
+
     /* ---------- 5. 关键控件齐全性 ---------- */
     console.log("\n[4] 原有控件未被破坏");
     const ids = ["url", "outDir", "sourceSelect", "browserSelect", "profileMode",

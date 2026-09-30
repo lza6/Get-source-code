@@ -1,7 +1,7 @@
 {
   "name": "get-source-code",
   "productName": "GetSourceCode",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "一键获取目标网站的源代码、网络数据包(HAR)与媒体资源的可视化工具（基于 Chrome DevTools Protocol）",
   "main": "src/main/main.js",
   "author": "lza6",

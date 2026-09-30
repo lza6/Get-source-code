@@ -381,15 +381,19 @@ function handleProgress(p) {
       log("skip", "⚑ " + (p.message || "已中止"));
       break;
     case "cf:detected":
-      log("skip", `⚑ 检测到 Cloudflare 挑战（${p.type}）`);
+      log("skip", `⚑ 检测到 Cloudflare 挑战（${p.challengeType}）`);
       log("skip", `  证据：${(p.evidence || []).join(", ")}`);
-      setStatus(`检测到 Cloudflare 挑战（${p.type}），正在处理…`, null);
+      setStatus(`检测到 Cloudflare 挑战（${p.challengeType}），正在处理…`, null);
       break;
     case "cf:passed":
       log("done", `✔ 已通过 Cloudflare 验证（${((p.elapsedMs || 0) / 1000).toFixed(1)}s）`);
       break;
     case "cf:failed":
       log("err", `✘ Cloudflare 未通过：${p.message || ""}`);
+      if (Array.isArray(p.nextSteps) && p.nextSteps.length) {
+        log("skip", "  建议按顺序尝试：");
+        p.nextSteps.forEach((s, i) => log("skip", `    ${i + 1}) ${s}`));
+      }
       setStatus("Cloudflare 挑战未通过，结果可能不完整", false);
       break;
     case "warning":

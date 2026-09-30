@@ -150,10 +150,88 @@ test("滚动采用分步推进（避免瞬间跳到底部导致懒加载不触�
   const src = require("fs").readFileSync(
     require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
   );
-  const body = src.slice(src.indexOf("async _scrollStepwise"), src.indexOf("async _handleChallenge"));
+  const body = src.slice(src.indexOf("async _scrollStepwise"), src.indexOf("_buildCfNextSteps"));
   assert.ok(/step/.test(body) && /scrollTo/.test(body), "_scrollStepwise 未实现分步滚动");
   // 每步不应一次到底：应基于 innerHeight 计算步长
   assert.ok(/innerHeight/.test(body), "步长未基于视口高度计算");
+});
+
+test("分步步数按距离推导，而非硬编码上限（R2 修复）", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  const body = src.slice(src.indexOf("async _scrollStepwise"), src.indexOf("_buildCfNextSteps"));
+  assert.ok(/Math\.ceil\(distance \/ step\)/.test(body),
+    "步数未按 distance/step 推导 —— 高页面将到不了底部");
+  assert.ok(!/s < 12/.test(body), "仍存在硬编码的 12 步上限");
+  // 应有防御性上限与 deadline 兜底
+  assert.ok(/maxSteps/.test(body), "缺少防御性步数上限");
+  assert.ok(/deadlineFn/.test(body), "分步滚动未接受 deadline，总时长可能失控");
+});
+
+test("滚动等待以网络空闲为主判据，避免与固定 delay 重复等待（R3 修复）", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  const body = src.slice(src.indexOf("async _scrollPage"), src.indexOf("async _scrollStepwise"));
+  assert.ok(/idleStart/.test(body) && /waited/.test(body),
+    "未记录网络空闲实际耗时，无法判断是否需要补足最小间隔");
+  assert.ok(/minGap/.test(body), "缺少最小间隔补齐逻辑");
+});
+
+test("Cloudflare 失败时给出可操作的下一步建议（R4）", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  assert.ok(/_buildCfNextSteps/.test(src), "缺少 CF 失败处置建议生成器");
+  const body = src.slice(src.indexOf("_buildCfNextSteps"), src.indexOf("async cleanup"));
+  // 各挑战类型都应有针对性建议
+  assert.ok(/CF_TYPE\.TURNSTILE/.test(body), "缺少 Turnstile 专属建议");
+  assert.ok(/CF_TYPE\.MANAGED/.test(body), "缺少 Managed 专属建议");
+  // 换 IP 是最通用且最有效的手段，必须出现
+  assert.ok(/更换网络出口|换 IP/.test(body), "缺少「更换出口 IP」这一关键建议");
+});
+
+test("CF 报告记录尝试次数与原因（可观测性）", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  assert.ok(/attempts: \[\]/.test(src), "cfReport 未初始化 attempts");
+  assert.ok(/attempts\.push/.test(src), "未记录 CF 尝试结果");
+  assert.ok(/nextSteps: \[\]/.test(src), "cfReport 未初始化 nextSteps");
+});
+
+test("事件名不能被 payload 覆盖（回归：CF 状态曾因此完全不显示）", async () => {
+  const { CaptureEngine } = require("../src/core/capture-engine");
+  const events = [];
+  const e = new CaptureEngine({
+    targetUrl: "https://x.com", outputDir: "/tmp/gsc-emit-test",
+    onProgress: (p) => events.push(p),
+  });
+  // payload 里带 type 字段（CF 挑战类型曾用过这个字段名）
+  e._emit("cf:failed", { type: "managed", message: "x" });
+  e._emit("cf:passed", { type: "jsd", elapsedMs: 100 });
+  e._emit("status", { message: "ok" });
+
+  assert.strictEqual(events[0].type, "cf:failed", "payload 的 type 覆盖了事件名");
+  assert.strictEqual(events[0].challengeType, undefined, "不应把 challengeType 与事件名混用");
+  assert.strictEqual(events[0].message, "x", "payload 其余字段应保留");
+  assert.strictEqual(events[1].type, "cf:passed", "payload 的 type 覆盖了事件名");
+  assert.strictEqual(events[2].type, "status");
+});
+
+test("CF 事件使用 challengeType 而非 type 承载挑战类型", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  // cf:* 事件中不得再用裸 type: 承载挑战类型
+  const cfEmits = src.match(/this\._emit\("cf:[^"]+",\s*\{[^}]*/g) || [];
+  assert.ok(cfEmits.length >= 3, `CF 事件数异常: ${cfEmits.length}`);
+  for (const chunk of cfEmits) {
+    assert.ok(!/\btype:\s*verdict\.type/.test(chunk),
+      `CF 事件仍用 type 承载挑战类型（会覆盖事件名）：${chunk.slice(0, 60)}`);
+  }
+  assert.ok(/challengeType: verdict\.type/.test(src), "未改用 challengeType");
 });
 
 test("close() 使挂起者失败，不产生悬挂 Promise", async () => {

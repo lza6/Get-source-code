@@ -126,6 +126,17 @@ function getPng(n) {
  * HTML 页面
  * ------------------------------------------------------------------ */
 
+/**
+ * 夹具支持两种懒加载触发模式，用于验证滚动实现的健壮性：
+ *
+ *   mode=scroll（默认）—— 绑定 scroll 事件 + 轮询检查 nearBottom()
+ *   mode=io            —— 用 IntersectionObserver 观察哨兵元素
+ *
+ * mode=io 更像现代真实站点，且**只有真正滚动过哨兵元素**才会触发 ——
+ * 它正是用来验证「分步滚动 vs 瞬移到底部」差异的场景：
+ * 若一次性 scrollTo(极大值)，观察器可能因元素从未进入视口交叉区而不回调。
+ */
+
 const INITIAL_IMAGES = 8;
 const BATCH_SIZE = 4;
 const TARGET_IMAGES = 40;
@@ -133,7 +144,11 @@ const BOTTOM_THRESHOLD_PX = 200;
 const POLL_INTERVAL_MS = 250;
 const IMAGE_HEIGHT_PX = 200;
 
-function buildHtml() {
+function buildHtml(mode, tall) {
+  const useIO = mode === "io";
+  // tall 模式：容器高度设为 800vh，制造「单轮分步滚动需要走很多步」的极高页面。
+  // 用于验证步数是按距离推导的，而非硬编码上限（否则永远到不了底、也就不会触发加载）。
+  const galleryMinHeight = tall ? "800vh" : "200vh";
   return [
     "<!DOCTYPE html>",
     '<html lang="en">',
@@ -147,7 +162,7 @@ function buildHtml() {
     // 关键：gallery 预留 200vh 高度，确保「首屏绝不触底」与视口尺寸无关。
     // 若初始内容比视口还矮，nearBottom() 一开始就为真，无需滚动即全部加载，
     // 夹具就失去了「验证滚动是否触发懒加载」的能力（曾因此产生过假阳性测试）。
-    "  #gallery { padding: 0 0 24px; min-height: 200vh; }",
+    "  #gallery { padding: 0 0 24px; min-height: " + galleryMinHeight + "; }",
     "  #gallery img { display: block; width: 100px; height: " + IMAGE_HEIGHT_PX + "px;",
     "                margin: 24px auto; border: 1px solid #cbd5e1; }",
     "  #sentinel { height: 120px; background: #e5e7eb; border-top: 2px dashed #94a3b8;",
@@ -188,6 +203,16 @@ function buildHtml() {
     "        if (counter) counter.textContent = String(window.__loadedCount);",
     "      }",
     "",
+    "      // 加载一批（两种模式共用）",
+    "      function loadBatch() {",
+    "        if (window.__loadedCount >= TARGET) return;",
+    "        for (var i = 0; i < BATCH && window.__loadedCount < TARGET; i++) {",
+    "          appendImage();",
+    "        }",
+    "        window.__loadEvents += 1;",
+    "        updateCounter();",
+    "      }",
+    "",
     "      function nearBottom() {",
     "        return (window.scrollY + window.innerHeight) >= (document.body.scrollHeight - THRESHOLD);",
     "      }",
@@ -199,18 +224,37 @@ function buildHtml() {
     "      function maybeLoadMore() {",
     "        if (window.__loadedCount >= TARGET) return;",
     "        if (!nearBottom()) return;",
-    "        for (var i = 0; i < BATCH && window.__loadedCount < TARGET; i++) {",
-    "          appendImage();",
-    "        }",
-    "        window.__loadEvents += 1;",
-    "        updateCounter();",
+    "        loadBatch();",
     "      }",
     "",
     "      window.__loadMore = maybeLoadMore;",
-    "      window.addEventListener('scroll', maybeLoadMore, { passive: true });",
-    "      window.addEventListener('resize', maybeLoadMore, { passive: true });",
-    "      // 兜底轮询：CDP 的 scrollTo 可能不触发 scroll 事件",
-    "      setInterval(maybeLoadMore, " + POLL_INTERVAL_MS + ");",
+    "      window.__loadEvents = 0;",
+    "      window.__mode = '" + (useIO ? "io" : "scroll") + "';",
+    "",
+    useIO
+      ? [
+          "      // IntersectionObserver 模式：只有哨兵真正进入视口交叉区才加载。",
+          "      // 一次性 scrollTo(0, 极大值) 可能跳过交叉过程；分步滚动才会稳定触发。",
+          "      var sentinelEl = document.getElementById('sentinel');",
+          "      if ('IntersectionObserver' in window && sentinelEl) {",
+          "        var io = new IntersectionObserver(function (entries) {",
+          "          for (var i = 0; i < entries.length; i++) {",
+          "            if (entries[i].isIntersecting) { loadBatch(); }",
+          "          }",
+          "        }, { rootMargin: '200px' });",
+          "        io.observe(sentinelEl);",
+          "        window.__ioActive = true;",
+          "      }",
+        ].join("\n")
+      : [
+          "      window.addEventListener('scroll', maybeLoadMore, { passive: true });",
+          "      window.addEventListener('resize', maybeLoadMore, { passive: true });",
+          "      // 兜底轮询：CDP 的 scrollTo 可能不触发 scroll 事件",
+          "      setInterval(maybeLoadMore, " + POLL_INTERVAL_MS + ");",
+        ].join("\n"),
+    "",
+    "      // 供 IO 模式调用的加载批函数（见上）",
+    "",
     "      updateCounter();",
     "    })();",
     "  </script>",
@@ -236,8 +280,8 @@ function makeInitialImages(count) {
 
 const IMG_ROUTE = /^\/img\/([^/]+)\.png$/;
 
-function sendHtml(res) {
-  const body = Buffer.from(buildHtml(), "utf8");
+function sendHtml(res, mode, tall) {
+  const body = Buffer.from(buildHtml(mode, tall), "utf8");
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": body.length,
@@ -272,9 +316,11 @@ function sendError(res, status, message) {
 
 function createRequestHandler() {
   return function handleRequest(req, res) {
-    let pathname;
+    let pathname, query;
     try {
-      pathname = new URL(req.url, "http://" + LISTEN_HOST).pathname;
+      const u = new URL(req.url, "http://" + LISTEN_HOST);
+      pathname = u.pathname;
+      query = u.searchParams;
     } catch (err) {
       sendError(res, 400, "Bad Request");
       return;
@@ -286,7 +332,11 @@ function createRequestHandler() {
     }
 
     if (pathname === "/" || pathname === "/index.html") {
-      sendHtml(res);
+      // ?mode=io  使用 IntersectionObserver 触发（更接近现代真实站点）
+      // ?tall=1   容器 800vh，制造需要多步滚动才能到底的极高页面
+      const mode = query.get("mode") === "io" ? "io" : "scroll";
+      const tall = query.get("tall") === "1";
+      sendHtml(res, mode, tall);
       return;
     }
 

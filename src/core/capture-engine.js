@@ -61,7 +61,10 @@ class CaptureEngine {
   _emit(type, payload) {
     if (typeof this.opts.onProgress === "function") {
       try {
-        this.opts.onProgress({ type, ...payload });
+        // 事件名放在展开之后，保证 payload **无法覆盖**它。
+        // 曾因 `_emit("cf:failed", { type: verdict.type })` 中的 type 覆盖了事件名，
+        // 导致 renderer 的 cf:* 分支永不命中 —— UI 完全没有 CF 状态反馈。
+        this.opts.onProgress({ ...payload, type });
       } catch {
         /* ignore */
       }
@@ -528,7 +531,7 @@ class CaptureEngine {
       const target = toBottom ? "bottom" : String((i + 1) / rounds);
 
       // 分步推进（每步不超过视口高度），给懒加载观察器触发机会
-      await this._scrollStepwise(target, stepDelay);
+      await this._scrollStepwise(target, stepDelay, remaining);
       if (this._aborted || remaining() <= 0) return;
 
       // 读取当前高度与位置
@@ -557,10 +560,20 @@ class CaptureEngine {
       }
       lastHeight = height;
 
+      // 等待本节新资源：以「网络空闲」为主判据。
+      // 原实现先固定睡满 delay(1200ms) 再等网络空闲，两者叠加造成重复等待
+      // （实测 B 组 12 轮耗时 38.8s）。现改为：先等网络空闲，仅当它**很快**
+      // 就判定空闲（说明懒加载还没发出请求）时，才补足 delay 作为最小间隔。
       if (remaining() <= 0) return;
-      await this._sleepInterruptible(Math.min(delay, Math.max(0, remaining())));
-      // 让懒加载请求发出去并完成，再测下一轮高度（共享总预算）
+      const idleStart = Date.now();
       await this._waitNetworkIdle(undefined, 3, remaining());
+      const waited = Date.now() - idleStart;
+      const minGap = Math.min(delay, Math.max(0, remaining()));
+      if (waited < minGap && remaining() > 0) {
+        await this._sleepInterruptible(Math.min(minGap - waited, Math.max(0, remaining())));
+        // 补齐最小间隔后若又产生了新请求，再等一次空闲
+        await this._waitNetworkIdle(undefined, 3, remaining());
+      }
     }
 
     // 回到顶部
@@ -574,10 +587,40 @@ class CaptureEngine {
    * 依赖 IntersectionObserver 的懒加载实现可能因此不触发。
    * 分步（每步 ≤ 一屏）更接近真实用户滚动，触发率显著更高。
    *
+   * 步数**按实际距离推导**（而非硬编码上限）：
+   *   steps = ceil(distance / step)，因此极高页面单轮也能真正到底。
+   *   仅保留 3000 步作为防御性上限（避免异常页面把预算耗尽），
+   *   并用 deadline 兜底，保证总时长不失控。
+   *
    * @param {string} target "bottom" 或 "0"~"1" 的比例字符串
    * @param {number} stepDelay 每步停顿
+   * @param {Function} [deadlineFn] 返回剩余毫秒；<=0 时立即停止
    */
-  async _scrollStepwise(target, stepDelay) {
+  async _scrollStepwise(target, stepDelay, deadlineFn) {
+    // 1) 先量出「当前位置 → 目标位置」的距离，据此推导步数
+    let distance = 0, step = 0;
+    try {
+      const r0 = await this.cdp.send("Runtime.evaluate", {
+        expression: `(function(){
+          const doc = document.documentElement, body = document.body;
+          const max = Math.max(body.scrollHeight, doc.scrollHeight) - window.innerHeight;
+          const want = ${target === "bottom" ? "max" : `max * ${target}`};
+          const st = Math.max(200, Math.floor(window.innerHeight * 0.8));
+          return JSON.stringify({ distance: Math.max(0, want - window.scrollY), step: st });
+        })()`,
+        returnByValue: true,
+      }, { sessionId: this.sessionId, timeout: 5000 });
+      const v = JSON.parse((r0 && r0.result && r0.result.value) || "{}");
+      distance = v.distance || 0;
+      step = v.step || 200;
+    } catch {
+      distance = 0;
+    }
+
+    const maxSteps = 3000; // 防御性上限，防止异常页面耗尽预算
+    const steps = Math.min(maxSteps, Math.max(1, Math.ceil(distance / step)));
+
+    // 2) 逐步推进
     const expr = `(function(){
       const doc = document.documentElement, body = document.body;
       const max = Math.max(body.scrollHeight, doc.scrollHeight) - window.innerHeight;
@@ -589,9 +632,9 @@ class CaptureEngine {
       return JSON.stringify({ cur, next: window.scrollY, want });
     })()`;
 
-    // 最多迭代若干步，避免极端页面耗时过久
-    for (let s = 0; s < 12; s++) {
+    for (let s = 0; s < steps; s++) {
       if (this._aborted) return;
+      if (typeof deadlineFn === "function" && deadlineFn() <= 0) return;
       let done = true;
       try {
         const r = await this.cdp.send("Runtime.evaluate", {
@@ -634,8 +677,10 @@ class CaptureEngine {
       type: verdict.type,
       confidence: verdict.confidence,
       evidence: verdict.evidence,
+      attempts: [],
+      nextSteps: [],
     };
-    this._emit("cf:detected", { type: verdict.type, evidence: verdict.evidence });
+    this._emit("cf:detected", { challengeType: verdict.type, evidence: verdict.evidence });
     this._emit("status", {
       message: `检测到 Cloudflare 挑战（${verdict.type}），正在尝试自动通过…`,
     });
@@ -643,9 +688,15 @@ class CaptureEngine {
     if (verdict.type === CF_TYPE.BLOCK) {
       this._cfReport.passed = false;
       this._cfReport.reason = "hard-block";
+      this._cfReport.nextSteps = [
+        "更换网络出口（代理/热点）——CF 硬封通常绑定 IP",
+        "稍后重试（封禁有时是临时的）",
+        "在「登录窗口」中手动打开该站点完成验证后再抓取",
+      ];
       this._emit("cf:failed", {
-        type: verdict.type,
+        challengeType: verdict.type,
         message: "被 Cloudflare 硬拦截，请更换出口 IP 或稍后重试",
+        nextSteps: this._cfReport.nextSteps,
       });
       return;
     }
@@ -664,19 +715,62 @@ class CaptureEngine {
     this._cfReport.elapsedMs = this._cfStartedAt ? Date.now() - this._cfStartedAt : 0;
 
     if (passed) {
-      this._emit("cf:passed", { type: verdict.type, elapsedMs: this._cfReport.elapsedMs });
+      this._cfReport.attempts.push({ waitMs: this._cfReport.elapsedMs, ok: true });
+      this._emit("cf:passed", { challengeType: verdict.type, elapsedMs: this._cfReport.elapsedMs });
       this._emit("status", {
         message: `✔ 已通过 Cloudflare 验证（${(this._cfReport.elapsedMs / 1000).toFixed(1)}s）`,
       });
     } else {
       this._cfReport.reason = "timeout";
+      this._cfReport.attempts.push({ waitMs: this._cfReport.elapsedMs, ok: false });
+      // 按挑战类型给出**可操作**的下一步，而不是笼统的"失败了"
+      this._cfReport.nextSteps = this._buildCfNextSteps(verdict.type);
       this._emit("cf:failed", {
-        type: verdict.type,
+        challengeType: verdict.type,
         message: "未能自动通过 Cloudflare 挑战，结果可能不完整",
+        nextSteps: this._cfReport.nextSteps,
       });
       this._emit("warning", {
-        message: "Cloudflare 挑战未通过：可尝试关闭无头模式、更换网络出口，或手动登录后重试",
+        message: `Cloudflare 挑战未通过（${verdict.type}）。建议：${this._cfReport.nextSteps[0]}`,
       });
+    }
+  }
+
+  /**
+   * 按挑战类型生成可操作的失败处置建议。
+   *
+   * CF 过盾本质是概率性的（CF 持续对抗），本工具不承诺 100%。
+   * 因此失败时最有价值的不是"重试"，而是**告诉用户具体该做什么**。
+   * @param {string} type CF_TYPE
+   * @returns {string[]} 建议列表（按推荐顺序）
+   */
+  _buildCfNextSteps(type) {
+    const common = [
+      "更换网络出口（代理/VPN/手机热点）——cf_clearance 绑定 IP，换 IP 是最有效手段",
+      "稍后重试——CF 的判定有随机性，同一条件重试可能通过",
+    ];
+    switch (type) {
+      case CF_TYPE.TURNSTILE:
+        return [
+          "勾选「允许自动触发 Turnstile 验证」后重试（键盘导航方式）",
+          "在「登录窗口」中手动完成验证，再用同一 profile 抓取",
+          ...common,
+        ];
+      case CF_TYPE.MANAGED:
+        return [
+          "确认已关闭「无头模式」——无头浏览器被识别概率显著更高",
+          "增大「挑战等待超时」，给挑战更充裕的通过时间",
+          "在「登录窗口」中手动通过一次，再用同一 profile 抓取",
+          ...common,
+        ];
+      case CF_TYPE.JSD:
+        return [
+          "增大「挑战等待超时」后重试",
+          "关闭「无头模式」",
+          ...common,
+        ];
+      default:
+        return common;
     }
   }
 

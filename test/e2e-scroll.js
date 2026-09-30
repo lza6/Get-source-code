@@ -101,7 +101,8 @@ function pageInfo(outDir) {
     const tB = Date.now();
     const rB = await capture(srv.url, dirB, { scrollRounds: 12, scrollToBottom: true });
     const pngB = countPng(dirB);
-    console.log(`      保存 ${rB.stats.saved} 个资源，其中 png ${pngB} 张，耗时 ${((Date.now() - tB) / 1000).toFixed(1)}s\n`);
+    const durB = ((Date.now() - tB) / 1000).toFixed(1);
+    console.log(`      保存 ${rB.stats.saved} 个资源，其中 png ${pngB} 张，耗时 ${durB}s\n`);
 
     /* ---------- C 组：按比例滚动（对照） ---------- */
     console.log("[C] 对照：scrollRounds = 12 + scrollToBottom = false（按比例）");
@@ -109,7 +110,26 @@ function pageInfo(outDir) {
     const tC = Date.now();
     const rC = await capture(srv.url, dirC, { scrollRounds: 12, scrollToBottom: false });
     const pngC = countPng(dirC);
-    console.log(`      保存 ${rC.stats.saved} 个资源，其中 png ${pngC} 张，耗时 ${((Date.now() - tC) / 1000).toFixed(1)}s\n`);
+    const durC = ((Date.now() - tC) / 1000).toFixed(1);
+    console.log(`      保存 ${rC.stats.saved} 个资源，其中 png ${pngC} 张，耗时 ${durC}s\n`);
+
+    /* ---------- D 组：IntersectionObserver 模式（更接近真实站点） ---------- */
+    console.log("\n[D] IntersectionObserver 模式（scroll 事件不触发，只靠观察器）");
+    const dirD = path.join(base, "D-io-mode");
+    const tD = Date.now();
+    const rD = await capture(srv.url + "?mode=io", dirD, { scrollRounds: 12, scrollToBottom: true });
+    const pngD = countPng(dirD);
+    const durD = ((Date.now() - tD) / 1000).toFixed(1);
+    console.log(`      保存 ${rD.stats.saved} 个资源，其中 png ${pngD} 张，耗时 ${durD}s\n`);
+
+    /* ---------- E 组：高页面（验证步数按距离推导，而非硬编码 12） ---------- */
+    console.log("[E] 高页面验证（首屏即超高，检验分步滚动能否真正到底）");
+    const dirE = path.join(base, "E-tall-page");
+    const tE = Date.now();
+    const rE = await capture(srv.url + "?tall=1", dirE, { scrollRounds: 12, scrollToBottom: true });
+    const pngE = countPng(dirE);
+    const durE = ((Date.now() - tE) / 1000).toFixed(1);
+    console.log(`      保存 ${rE.stats.saved} 个资源，其中 png ${pngE} 张，耗时 ${durE}s\n`);
 
     /* ---------- 验收判定 ---------- */
     console.log("[验收] 量化对比");
@@ -141,6 +161,32 @@ function pageInfo(outDir) {
     } else {
       check("read page-info.json", false, "缺少 page-info.json");
     }
+
+    /* ---------- IntersectionObserver 模式 ---------- */
+    console.log("\n[验收] IntersectionObserver 模式（scroll 事件不参与）");
+    const infoD = pageInfo(dirD);
+    check("IO 模式下滚动仍能触发懒加载", pngD > pngA, `png ${pngA} → ${pngD}`);
+    if (infoD) {
+      check("IO 模式 DOM 图片数显著增加", infoD.images > (infoA ? infoA.images : 0),
+        `DOM img ${infoA ? infoA.images : "?"} → ${infoD.images}`);
+    }
+
+    /* ---------- 高页面：验证步数按距离推导 ---------- */
+    console.log("\n[验收] 高页面（800vh，验证不再受硬编码 12 步限制）");
+    const infoE = pageInfo(dirE);
+    if (infoE) {
+      console.log(`      E 组: scrollHeight 需多步；DOM img=${infoE.images}, __loadedCount=${infoE.loaded}`);
+    }
+    check("高页面下仍能触底并完成加载", pngE > pngA, `png ${pngA} → ${pngE}`);
+    check("高页面能加载到目标总数（证明分步滚动真能到底）",
+      infoE ? infoE.loaded >= 40 : false,
+      infoE ? `__loadedCount=${infoE.loaded}` : "无 page-info");
+
+    /* ---------- 性能：R3 去重后耗时应下降 ---------- */
+    console.log("\n[验收] 耗时对比（R3：消除 delay 与 idle 的重复等待）");
+    console.log(`      B(到底)=${durB}s；C(比例)=${durC}s；D(IO)=${durD}s；E(高页)=${durE}s`);
+    check("IO 模式完成时间在合理范围（<120s）", Number(durD) < 120, `${durD}s`);
+    check("高页面完成时间在合理范围（<120s）", Number(durE) < 120, `${durE}s`);
 
     /* ---------- 提前结束验证 ---------- */
     console.log("\n[验收] 智能提前结束（不浪费轮次）");
