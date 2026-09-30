@@ -24,10 +24,12 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: node test/test.js
-        continue-on-error: true
+        run: npm run test:all
 
       - name: Build (Windows)
+        # electron-builder 在检测到 git tag + GH_TOKEN 时会「隐式发布」，
+        # 与下方的 softprops/action-gh-release 形成两个发布者 →
+        # 产生重复 Release 与重复附件。故显式禁用，统一由下方步骤发布。
         run: npm run build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,6 +50,7 @@ jobs:
           files: |
             dist/*.exe
             dist/*.blockmap
+            dist/latest.yml
           generate_release_notes: true
           draft: false
         env:

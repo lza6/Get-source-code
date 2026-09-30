@@ -20,7 +20,7 @@
     "dev": "electron . --dev",
     "icon": "node scripts/generate-icon.js",
     "prebuild": "node scripts/generate-icon.js",
-    "build": "electron-builder --win",
+    "build": "electron-builder --win --publish never",
     "build:portable": "electron-builder --win portable",
     "build:dir": "electron-builder --dir",
     "test": "node test/test.js",
