@@ -110,7 +110,14 @@ class MimeClassifier {
   }
 }
 
-/** 生成安全的文件名（去除非法字符，限长） */
+/**
+ * 生成安全的文件名（去除非法字符，限长）
+ *
+ * 截断注意：原实现 `n.slice(0, maxLen - ext.length)` 在 `ext.length > maxLen`
+ * （最后一个 `.` 之后超长，如某些 CDN 的点号长 token）时，参数为负 → 返回空串
+ * → 结果退化为「纯扩展名」且长度远超 maxLen，截断完全失效、多个文件互相覆盖。
+ * 现在强制：扩展名本身也限长，且 stem 至少保留 1 个字符。
+ */
 function safeFileName(name, maxLen = 120) {
   let n = String(name)
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
@@ -119,8 +126,15 @@ function safeFileName(name, maxLen = 120) {
     .replace(/[. ]+$/, "_");
   if (!n) n = "_";
   if (n.length > maxLen) {
-    const ext = path.extname(n);
-    n = n.slice(0, maxLen - ext.length) + ext;
+    const rawExt = path.extname(n);
+    // 扩展名最多占一半配额（且不超过 16），保证 stem 始终有空间
+    const extCap = Math.max(0, Math.min(16, Math.floor(maxLen / 2)));
+    const ext = rawExt.length > extCap ? rawExt.slice(0, extCap) : rawExt;
+    const stem = n.slice(0, Math.max(1, n.length - rawExt.length));
+    const keep = Math.max(1, maxLen - ext.length);
+    n = stem.slice(0, keep) + ext;
+    // 兜底硬截断：确保结果**永不**超过 maxLen（契约保证）
+    if (n.length > maxLen) n = n.slice(0, maxLen);
   }
   return n;
 }

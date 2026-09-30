@@ -14,10 +14,48 @@ const WebSocket = require("ws");
 class CDPClient {
   constructor(wsUrl, { onEvent } = {}) {
     this.wsUrl = wsUrl;
-    this.onEvent = onEvent || (() => {});
     this._id = 0;
-    this._pending = new Map();
+    this._pending = new Map();   // id -> { resolve, reject, timer }
+    this._listeners = new Set(); // 常驻订阅者（事件流）
+    this._waiters = new Set();   // 一次性等待器（waitFor）
     this._connected = false;
+    if (onEvent) this._listeners.add(onEvent);
+  }
+
+  /**
+   * 订阅事件流，返回取消订阅函数。
+   *
+   * 为什么不用 `onEvent` 单例回调？——原实现用「替换 onEvent 再包一层」实现 waitFor，
+   * 两个并发 waitFor 会互相覆盖包装器，导致其中一个永远收不到事件（静默失效）。
+   * 现改为「订阅者集合 + 等待器集合」，二者互不干扰。
+   */
+  on(fn) {
+    this._listeners.add(fn);
+    return () => this._listeners.delete(fn);
+  }
+
+  /** 分发事件给所有订阅者与匹配的等待器 */
+  _dispatch(evt) {
+    for (const fn of [...this._listeners]) {
+      try {
+        fn(evt);
+      } catch {
+        /* 单个订阅者异常不得影响其他订阅者与等待器 */
+      }
+    }
+    for (const w of [...this._waiters]) {
+      let hit = false;
+      try {
+        hit = w.match(evt);
+      } catch {
+        hit = false;
+      }
+      if (!hit) continue;
+      this._waiters.delete(w);
+      clearTimeout(w.timer);
+      if (evt.type === "disconnected") w.reject(new Error("CDP 连接已断开"));
+      else w.resolve(evt.params);
+    }
   }
 
   /** 建立连接 */
@@ -45,7 +83,9 @@ class CDPClient {
       });
       ws.on("close", () => {
         this._connected = false;
-        this.onEvent({ type: "disconnected" });
+        this._dispatch({ type: "disconnected" });
+        // 一并清理在途命令：浏览器崩溃/被关闭时，否则 send 要各自等到 30–60s 超时才失败
+        this.abortAll("CDP 连接已断开");
       });
       ws.on("message", (raw) => this._handleMessage(raw));
     });
@@ -69,7 +109,7 @@ class CDPClient {
     }
     // 事件
     if (msg.method) {
-      this.onEvent({ type: "event", method: msg.method, params: msg.params, sessionId: msg.sessionId });
+      this._dispatch({ type: "event", method: msg.method, params: msg.params, sessionId: msg.sessionId });
     }
   }
 
@@ -101,28 +141,54 @@ class CDPClient {
     });
   }
 
-  /** 注册事件监听（用于特定流程等待） */
+  /**
+   * 等待某个事件（一次性）。
+   * 多个 waitFor 可并发，互不覆盖。
+   */
   waitFor(method, { sessionId, timeout = 30000, predicate } = {}) {
     return new Promise((resolve, reject) => {
-      const prev = this.onEvent;
-      const timer = setTimeout(() => {
-        this.onEvent = prev;
+      const waiter = {
+        match: (evt) => {
+          if (evt.type === "disconnected") return true; // 断连时立即失败，避免挂死
+          return (
+            evt.type === "event" &&
+            evt.method === method &&
+            (!sessionId || evt.sessionId === sessionId) &&
+            (!predicate || predicate(evt.params))
+          );
+        },
+        resolve,
+        reject,
+        timer: null,
+      };
+      waiter.timer = setTimeout(() => {
+        this._waiters.delete(waiter);
         reject(new Error(`等待事件超时: ${method}`));
       }, timeout);
-      this.onEvent = (evt) => {
-        prev(evt);
-        if (evt.type === "event" && evt.method === method) {
-          if (sessionId && evt.sessionId !== sessionId) return;
-          if (predicate && !predicate(evt.params)) return;
-          clearTimeout(timer);
-          this.onEvent = prev;
-          resolve(evt.params);
-        }
-      };
+      this._waiters.add(waiter);
     });
   }
 
+  /**
+   * 中止所有在途命令与等待器（用户点「停止」时调用）。
+   * 使挂起的 send/waitFor 立即 reject（带 aborted 标记），而不是等到超时。
+   */
+  abortAll(reason = "已中止") {
+    for (const [id, { reject, timer }] of this._pending) {
+      clearTimeout(timer);
+      this._pending.delete(id);
+      reject(Object.assign(new Error(reason), { aborted: true }));
+    }
+    for (const w of [...this._waiters]) {
+      clearTimeout(w.timer);
+      this._waiters.delete(w);
+      w.reject(Object.assign(new Error(reason), { aborted: true }));
+    }
+  }
+
   close() {
+    // 先让挂起者失败，再断开，避免 Promise 永久悬挂
+    this.abortAll("CDP 连接已关闭");
     try {
       if (this._ws) this._ws.close();
     } catch {

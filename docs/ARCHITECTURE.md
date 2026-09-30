@@ -247,6 +247,104 @@ dist/
 
 ---
 
+## 附录 C：v1.2.0 关键变更（正确性 + CF 过盾）
+
+### C.1 事件分发模型重构
+
+`CDPClient` 不再用单例 `onEvent` 回调（`waitFor` 通过替换它实现，会导致**并发 `waitFor` 互相覆盖**），
+改为两个独立集合：
+
+```
+_listeners : Set<fn>      常驻订阅者（事件流），on(fn) 返回取消函数
+_waiters   : Set<waiter>  一次性等待器，waitFor() 注册，命中即销毁
+```
+
+`_dispatch(evt)` 先广播给订阅者（单个抛错不影响其他），再匹配等待器。
+`abortAll(reason)` 一次性 reject 所有在途 `send` 与 `waitFor` —— 这是「停止」按钮能立即生效的关键。
+
+### C.2 HAR 响应体（`content.text`）
+
+此前 HAR 只写 `size`/`mimeType`，**不含响应体**，导入 DevTools/Charles 后「有请求无内容」。
+
+```
+Network.getResponseBody → Buffer
+   ├─ 写磁盘（原有）
+   └─ har.attachBody(requestId, { text, encoding, mimeType, size })   ← 新增
+         ├─ size ≤ 1MB  → content.text（base64 时带 content.encoding="base64"）
+         └─ size > 1MB  → content._bodyOmitted + content._bodyFile（避免 .har 膨胀到 GB 级）
+```
+
+### C.3 Cloudflare 过盾
+
+```
+导航完成
+   ↓
+[cfAutoPass 开启?] ──否──→ 常规流程
+   ↓是
+_probeChallenge()  采集四类证据
+   ├─ headers   （从 HAR 的 Document 条目取主文档响应头）
+   ├─ title     （document.title）
+   ├─ html      （outerHTML 前 64KB）
+   └─ frameTree （Page.getFrameTree，定位 Turnstile iframe）
+   ↓
+cf-detector.detectChallenge(probe)
+   ├─ 强证据（CF 专属标记）单独定案
+   └─ 弱证据（如 server:cloudflare）永不误报
+   ↓
+按类型分流
+   ├─ jsd / managed → 等待自动通过（_waitForChallengePass 轮询 cf_clearance）
+   ├─ turnstile     → 可选键盘导航触发（Tab × N + Enter，须显式开启）
+   └─ block         → 直接如实报失败
+   ↓
+结果写入 metadata.json.cf（detected / type / evidence / passed / elapsedMs）
+```
+
+**关键设计**：本项目**主用浏览器内过盾**而非纯协议求解。原因是 `cf_clearance`
+绑定 IP + JA3(TLS 指纹) + UA，Node 侧求解的 cookie 交给 Chrome 会因 JA3 不符而失效。
+真实浏览器（C3）天然满足三要素一致。
+
+### C.4 反自动化：移除 `Runtime.enable`
+
+`Runtime.enable` 的使用可被页面侧 JS 检测（`rebrowser-patches` 实证 Cloudflare/DataDome 在用）。
+本引擎对 Runtime 域**唯一用途**是 `Runtime.evaluate`（导出 DOM / 滚动），
+实测该命令**无需 enable 即可工作**，且从不消费 Runtime 事件 → **直接移除，零功能损失**。
+
+### C.5 滚动与超时预算
+
+`_scrollPage` 改为「检测 `scrollHeight` 是否停止增长」（连续 2 轮不变且到底则提前结束），
+并为**整个滚动阶段**设立共享 `deadline`（而非每轮各吃满一个 `timeout`），
+`_waitNetworkIdle(idle, stableChecks, budgetMs)` 支持传入剩余预算。
+
+---
+
+## 附录 D：v1.2.0 产出结构（新增字段）
+
+```
+<outputDir>/
+├── source/<host>/…           JS / CSS / 字体
+├── media/<host>/…            图片 / 视频 / 音频
+├── other/<host>/…            JSON / XML 等
+├── page.html                 渲染后 DOM
+├── page-info.json            标题等元信息
+├── network.har               网络数据包（**v1.2 起含 content.text 响应体**）
+└── metadata.json             抓取清单（**v1.2 起含 cf 字段**）
+```
+
+`metadata.json.cf` 结构：
+
+```jsonc
+"cf": {
+  "detected": true,
+  "type": "managed",          // jsd | managed | turnstile | block
+  "confidence": "high",
+  "evidence": ["header:cf-mitigated=challenge", "html:cdn-cgi/challenge-platform"],
+  "passed": true,
+  "elapsedMs": 3240
+}
+```
+
+---
+
 ## 附录 B：浏览器来源与登录态（v1.1 新增）
 
 ### B.1 三种浏览器来源

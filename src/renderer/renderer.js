@@ -50,6 +50,22 @@ async function init() {
   // 内置浏览器下载
   $("btnDownloadBrowser").onclick = downloadBrowser;
 
+  // Cloudflare 过盾开关
+  $("cfAutoPass").onchange = () => {
+    const on = $("cfAutoPass").checked;
+    $("cfTurnstileRow").style.display = on ? "" : "none";
+    // 无头模式易被 CF 识别 → 开启过盾时提示并自动关闭无头
+    if (on && $("headless").checked) {
+      log("status", "» 已开启 CF 过盾：无头模式易被识别，已自动切换为「显示浏览器窗口」");
+      $("headless").checked = false;
+    }
+  };
+  $("cfClickTurnstile").onchange = () => {
+    if ($("cfClickTurnstile").checked) {
+      log("status", "» 已允许自动触发 Turnstile 验证（仅限自有/已授权站点）");
+    }
+  };
+
   // profile 模式
   $("profileMode").onchange = () => {
     $("profileNameField").style.display = $("profileMode").value === "persistent" ? "" : "none";
@@ -282,6 +298,9 @@ async function start() {
     extraWait: clampInt($("extraWait").value, 0, 120) * 1000,
     timeout: clampInt($("timeout").value, 5, 600) * 1000,
     maxResourceSize: clampInt($("maxFileMB").value, 1, 2048) * 1024 * 1024,
+    cfAutoPass: $("cfAutoPass").checked,
+    cfClickTurnstile: $("cfClickTurnstile").checked,
+    cfChallengeTimeout: clampInt($("cfTimeout").value, 5, 180) * 1000,
   };
 
   const res = await window.api.start(opts);
@@ -359,6 +378,18 @@ function handleProgress(p) {
       break;
     case "aborted":
       log("skip", "⚑ " + (p.message || "已中止"));
+      break;
+    case "cf:detected":
+      log("skip", `⚑ 检测到 Cloudflare 挑战（${p.type}）`);
+      log("skip", `  证据：${(p.evidence || []).join(", ")}`);
+      setStatus(`检测到 Cloudflare 挑战（${p.type}），正在处理…`, null);
+      break;
+    case "cf:passed":
+      log("done", `✔ 已通过 Cloudflare 验证（${((p.elapsedMs || 0) / 1000).toFixed(1)}s）`);
+      break;
+    case "cf:failed":
+      log("err", `✘ Cloudflare 未通过：${p.message || ""}`);
+      setStatus("Cloudflare 挑战未通过，结果可能不完整", false);
       break;
     case "warning":
       log("err", "⚠ " + (p.message || ""));

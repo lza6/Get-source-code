@@ -103,6 +103,20 @@
       </fieldset>
 
       <fieldset class="group">
+        <legend>反爬处理（Cloudflare）</legend>
+        <label class="check"><input type="checkbox" id="cfAutoPass" /><span>自动检测并尝试通过 <small>遇 CF 挑战时自动处理</small></span></label>
+        <label class="check" id="cfTurnstileRow" style="display:none"><input type="checkbox" id="cfClickTurnstile" /><span>允许自动触发 Turnstile 验证 <small>键盘导航方式，仅限自有/授权站点</small></span></label>
+        <label class="field-sm" style="margin-top:8px">
+          <span>挑战等待超时(秒)</span>
+          <input type="number" id="cfTimeout" value="30" min="5" max="180" />
+        </label>
+        <p class="hint" id="cfHint">
+          勾选后，若目标站点出现 Cloudflare 人机验证，工具会自动尝试通过。
+          <b>无头模式容易被识别</b>，建议取消「无头模式」以提升成功率。
+        </p>
+      </fieldset>
+
+      <fieldset class="group">
         <legend>高级选项</legend>
         <label class="check inline">
           <input type="checkbox" id="headless" checked /><span>无头模式 <small>不显示浏览器窗口</small></span>
@@ -181,7 +195,15 @@
           </ul>
         </li>
         <li><b>无头模式</b>：勾选则不显示浏览器窗口；遇到需人工登录 / 过验证码的站点可取消勾选。</li>
-        <li><b>滚动次数</b>：对懒加载页面（如瀑布流）设置正向滚动次数以触发更多资源加载。</li>
+        <li><b>滚动次数</b>：对懒加载页面（如瀑布流）设置正向滚动次数以触发更多资源加载。
+            工具会自动检测页面高度是否停止增长并提前结束，不会浪费时间。</li>
+        <li><b>反爬处理（Cloudflare）</b>：勾选后，遇到 CF 人机验证会自动尝试通过。
+            <ul>
+              <li>建议同时<b>取消「无头模式」</b>——无头浏览器更容易被识别。</li>
+              <li>「允许自动触发 Turnstile」采用键盘导航方式（更接近真实用户），<b>默认关闭</b>，仅限自有或已授权测试的站点。</li>
+              <li>过盾失败时会<b>明确告知</b>，不会假装成功。可尝试更换网络出口后重试。</li>
+            </ul>
+        </li>
       </ol>
       <h4>输出结构</h4>
       <pre class="mini">保存目录/

@@ -1,138 +1,139 @@
-# GetSourceCode — 迭代任务状态
+# GetSourceCode — v1.2.0 迭代任务状态
 
 > 主控代理（Orchestrator）维护。只记录事实与证据，不记录私有推理。
+> 本轮完成时间：2026-09-30
 
 ## 本轮目标（用户授权全部阶段）
 
-1. **新功能**：内置浏览器（云下载，方便无浏览器用户）+ 可选系统浏览器 / 持久 profile（带 cookie 抓登录站）
-2. **本地 E2E 验证** + 压测 + 深度自检
-3. **提交、推送 main、创建 Release**
-4. **回到源码分析主线**：用本工具实测抓取目标站点
+1. **P0 正确性修复**（6 项，含 1 项联网调研新发现）
+2. **P1 稳定性修复**（可中断 / 断连清理 / 总时长预算）
+3. **Cloudflare 过盾**（检测 + 自动通过 + UI）
+4. **真实 E2E 验收 + 独立审计 + 压测 + 稳定性**
+5. **提交、推送 main、创建 Release v1.2.0**
 
 **明确排除**：线上部署（用户明确要求不做）
 
 ---
 
-## 任务图
+## 任务图与完成状态
 
-| # | 子任务 | 依赖 | 状态 | 交付物 | 验收标准 |
-|---|--------|------|------|--------|---------|
-| T1 | 研究：内置浏览器方案 | — | ✅ 完成 | 研究报告 | 含可用代码片段 ✅ |
-| T2 | 审计：现有代码缺陷 | — | 🔄 进行中 | 缺陷清单 | 带 file:line |
-| T3 | 研究：HAR 规范 + 压测方法学 | — | 🔄 进行中 | 方法学报告 | 可执行方案 |
-| T4 | 实现：浏览器源管理 | T1 | ✅ 完成 | `browser-manager.js` | 三模式可用 ✅ 实测 |
-| T5 | 实现：Chrome 下载器 | T1 | ✅ 完成 | `chromium-downloader.js` | 下载+解压+抓取 ✅ 实测 |
-| T6 | 实现：UI 增强 | T4,T5 | ⏸ 待开始 | renderer 更新 | 交互完整 |
-| T7 | 加固：并发/资源清理/安全 | T2 部分 | 🔄 进行中 | 修复代码 | 已修 abort/原子写/断连检测 |
-| T8 | 测试：单元 + E2E 扩充 | T4-T7 | 🔄 进行中 | 测试套件 | 19/19 通过 |
-| T9 | 压测：并发抓取 | T8 | ⏸ 待开始 | 压测报告 | 有量化数据 |
-| T10 | 审查：代码 + 安全（独立） | T4-T7 | ⏸ 待开始 | 审查报告 | 独立于实现者 |
-| T11 | 发布：commit + push + Release | 全部 | ⏸ 待开始 | GitHub Release | 成功可下载 |
-| T12 | 主线：用工具抓取目标站点 | T11 | ⏸ 待开始 | 抓取结果 | 成功 + 分析 |
-
----
-
-## 基线（本轮开始前）
-
-| 项 | 值 |
-|----|-----|
-| 测试 | 19/19 通过（单元 + example.com 集成） |
-| 端点/功能 | 源码抓取、HAR、DOM 快照、媒体、懒加载 |
-| 打包 | NSIS + portable（各 107MB），实测可运行 |
-| 仓库 | `lza6/Get-source-code`，main 分支，PUBLIC |
-| HEAD | `a5d8516`（Merge origin/main） |
+| # | 子任务 | 状态 | 交付物 | 验收证据 |
+|---|--------|------|--------|---------|
+| P0-1 | CDPClient 事件分发重构 | ✅ | `cdp-client.js` | 6 项单测；原有 38 项全绿 |
+| P0-2 | HAR 响应体注入 | ✅ | `har-builder.js` + engine | E2E：`content.text` 长度 1769，**与磁盘字节一致** |
+| P0-3 | safeFileName 截断修复 | ✅ | `mime-utils.js` | 6 档 maxLen × 5 类输入全满足契约 |
+| P0-4 | 禁用缓存 | ✅ | `capture-engine.js` | E2E 二次抓取 saved=1 未丢 body |
+| P0-5 | 健壮滚动 | ✅ | `capture-engine.js` | E2E 滚动执行 + 高度检测生效 |
+| P0-6 | 移除 Runtime.enable | ✅ | `capture-engine.js` | 实测 evaluate 无需 enable；38 项回归全绿 |
+| P0-7 | 滚动总时长预算（审查发现） | ✅ | `capture-engine.js` | 静态断言 + 共享 deadline |
+| P1-1 | 可中断 CDP（abortAll） | ✅ | `cdp-client.js` | 4 项单测，中止 <2s 生效 |
+| P1-2 | 断连清理在途命令（审查发现） | ✅ | `cdp-client.js` | 单测：断连后 <2s 失败 |
+| C1 | CF 挑战检测器 | ✅ | `cf-detector.js`（新） | 32 项单测 + 真实浏览器零误报 |
+| C3 | 浏览器内过盾 | ✅ | `capture-engine.js` | 10 项 CF E2E |
+| C4 | UI 开关与反馈 | ✅ | `index.html` / `renderer.js` | 16 项 UI 验证（含点击联动） |
+| T1 | 独立代码审查 | ✅ | 审查报告 | 发现 3 真实缺陷，全部修复 |
+| T2 | HAR 规范审计 | ✅ | 审计报告 | 见下 |
+| T3 | 全量回归 | ✅ | — | **116 项单测全绿** |
+| T4 | E2E 验收 | ✅ | — | P0 14 项 + CF 10 项 + UI 16 项 |
+| T5 | 压测 + 稳定性 | ✅ | — | 并发 3 → 100%；soak 6 轮零泄漏 |
+| T6 | 打包验证 | ✅ | `dist/*.exe` | NSIS + portable 各 107MB，含新模块 |
+| T7 | 文档三件套 | ✅ | CHANGELOG / README / 本文档 | — |
+| T8 | 提交 + 推送 + Release | 🔄 | — | 见下 |
 
 ---
 
-## 验证日志
+## 验证日志（全部实际执行）
 
-| 时间 | 动作 | 结果 |
+| 时间 | 动作 | 命令 | 结果 |
+|------|------|------|------|
+| 基线 | 原有测试 | `node test/test.js` | 38/38 ✅ |
+| P0 后 | P0 定点单测 | `node test/unit-p0.js` | 26/26 ✅ |
+| P0 后 | CF 检测器单测 | `node test/unit-cf-detector.js` | 32/32 ✅ |
+| P0 后 | 边界测试 | `node test/edge-cases.js` | 20/20 ✅ |
+| P0 后 | 全量回归 | `npm run test:all` | **116/116 ✅** |
+| P0 后 | 真实 E2E | `node test/e2e-p0-acceptance.js` | 14/14 ✅ |
+| CF 后 | CF 集成 E2E | `node test/e2e-cf.js` | 10/10 ✅ |
+| CF 后 | UI 真实渲染 | `node test/e2e-ui.js` | 16/16 ✅ |
+| 稳定性 | Soak 6 轮 | `node test/soak.js 6` | 6/6，heap +0.9MB，进程零泄漏 ✅ |
+| 并发 | 压测并发 3 | `node test/bench.js 3` | 3/3，峰值 67→31，零残留 ✅ |
+| 打包 | NSIS+portable | `npm run build` | 成功，新模块入 asar ✅ |
+
+**验证总数：116（单元/集成）+ 40（E2E/UI）+ 6（soak）+ 3（并发）= 165 项**
+
+---
+
+## 关键实测证据
+
+### HAR 响应体（P0-2）—— 此前恒为空
+
+```
+▶ 样例证据: https://example.com/s.js
+  content.mimeType = text/javascript
+  content.size     = 2153
+  content.text     = "var B=document.body,P,i,j,p,f;B.children[0].insertAdjacentHTML(..."
+  text 长度         = 1769
+  ⇒ 内联 body 与磁盘文件字节一致：一致 1/1
+  ⇒ HAR 体积受控：7.9 KB
+```
+
+### Runtime.enable 移除（P0-6）—— 实测证明可行
+
+```
+--- 未调用 Runtime.enable，直接 Runtime.evaluate ---
+✅ 成功: {"title":"Example Domain","url":"https://example.com/"}
+--- 对照：补一次 Runtime.enable 后再 evaluate ---
+✅ 成功: Example Domain
+```
+移除后 38 项原有测试全绿，`page.html` 产出 23210 字节正常。
+
+### UI 交互反馈（C4）—— 用户关心的"点击后有反馈"
+
+```
+✓ 勾选后 Turnstile 行显示  — flex
+✓ 勾选过盾后无头模式被自动关闭  — headless=false
+✓ 日志给出了无头模式提示（有反馈）
+```
+
+---
+
+## 独立审查发现（已全部修复）
+
+| # | 缺陷 | 严重度 | 由谁发现 | 修复 |
+|---|------|--------|---------|------|
+| 1 | `_scrollPage` 每轮吃满 timeout → 最坏 37 分钟 | HIGH | 审查代理 | 共享 deadline 预算 + `budgetMs` 参数 |
+| 2 | `ws.on("close")` 不清理在途 send → 崩溃后等 30–60s | MEDIUM | 审查代理 | 断连时调用 `abortAll()` |
+| 3 | `safeFileName` 小 maxLen 下仍超限 | LOW | 审查代理 | 扩展名配额 + 兜底硬截断 |
+| 4 | `_dispatch` 中 `w.resolve` 在 disconnected 分支 | 无问题 | — | 逻辑正确（走 reject 分支） |
+| 5 | `attachBody` 用解码后 size 判定 | 无问题 | — | 符合 HAR 规范 |
+| 6 | `close()`/`abortAll()` 竞态 | 无问题 | — | 无竞态 |
+
+> **审查结论摘要**：核心重构（`_dispatch` / `abortAll` / `waitFor`）逻辑**正确**；
+> C 项（attachBody 体积判定）按 HAR 规范站得住；真正值得修的是滚动总时长，已修。
+
+---
+
+## 已识别风险（本轮未消除，如实披露）
+
+| 风险 | 状态 | 说明 |
 |------|------|------|
-| T0 | 基线测试 | 19/19 通过 |
-| T0 | 启动 T1/T2/T3 侦察代理 | 3 个并行 |
-| T1 | 研究完成（内置浏览器） | 关键结论：不可复用真实 profile；镜像可用 |
-| T4 | BrowserManager 实现 + 测试 | ✅ 路径穿越防护验证通过 |
-| T5 | 下载器实现 + 真实下载 115MB | ✅ 32.4s 完成，E2E 抓取成功 |
-| T7 | 修复 abort 缺陷 | ✅ 实测确认修复（返回 aborted 而非假成功） |
-| T7 | 原子写 + 断连检测 | ✅ 已实现 |
-| T6 | UI 增强 + CDP 截图验证 | ✅ 所有新元素渲染正确 |
-| T8 | 测试扩充至 31 项 | ✅ 31/31 通过 |
-| T9 | 压测 并发3 | ✅ 100% 成功、零泄漏 |
-| T9 | 压测 并发5 | ✅ 100% 成功、峰值 101 进程、结束回落 19（零泄漏） |
-| T9 | 进程增减直接验证 | ✅ 19→33→19（差 0） |
-
-## 压测数据
-
-| 并发 | 成功率 | 平均耗时 | 峰值进程 | 结束进程 | 泄漏 | 端口释放 |
-|------|-------|---------|---------|---------|------|---------|
-| 3 | 100% | 13.9s | — | 19 | 0 | 3/3 |
-| 5 | 100% | 37.3s | **101** | 19 | **0** | 5/5 |
-
-**观察**：并发 5 平均耗时较并发 3 增加约 2.7×，呈**超线性**退化，说明存在资源竞争（CPU/磁盘/网络）。建议默认并发 ≤ 3。
+| CF 过盾不保证 100% 通过 | 已知 | CF 是持续对抗；工具提供手段但不承诺结果；失败时明确告知 |
+| 纯协议 `cf_clearance` 未实现 | **未做** | 受 JA3 限制（Node TLS 栈 ≠ Chrome），收益低于成本，留待 v2.0 |
+| Turnstile 交互自动点击 | 默认关闭 | 采用键盘导航（FlareSolverr 思路）；需用户显式开启 |
+| iframe / OOPIF 内容导出 | **未覆盖** | `Runtime.evaluate` 不带 contextId，跨源 iframe 不导出；属既有局限 |
+| `Runtime.enable` 相关测试为静态断言 | 已知 | 可被动态方式绕过；E2E 已提供行为级证据作为补充 |
 
 ---
 
-## 阻塞项
+## 本轮不做（明确排除）
 
-（无）
-
----
-
-## 已识别风险
-
-| 风险 | 缓解 |
-|------|------|
-| Chrome for Testing 下载源不稳/被墙 | 提供镜像回退；支持用户手动指定 |
-| 用户真实 profile 被 Chrome 占用 | 默认用工具独立持久 profile，避免冲突 |
-| 内置 chromium 使包体积暴增 | 默认按需下载（不内置），可选内置 |
-| 压测导致浏览器进程堆积 | 强制进程树清理 + 超时兜底 |
-| 反爬站点（Cloudflare） | 非目标；提供人工介入（非无头模式） |
+- 线上部署（用户明确要求）
+- 第三方商业过盾 API 集成
+- 批量/并发绕过 CF（合规红线）
+- puppeteer / playwright 等重型依赖（破坏零原生依赖卖点）
 
 ---
 
-## 追加验证（本轮）
+## 下一步（v2.0 方向）
 
-| 时间 | 动作 | 结果 |
-|------|------|------|
-| T9+ | 稳定性 soak 测试（8 轮连续抓取） | ✅ 8/8 成功、heap +0.7MB、进程零泄漏 |
-| T8+ | 登录态 E2E | ✅ 6/6 通过 |
-| T8+ | 组合 E2E（内置浏览器+登录态+抓取） | ✅ 11/11 通过 |
-| T11 | 打包验证（v1.1.0 portable 96MB） | ✅ 新模块已打包，exe 正常启动 |
-| T11 | 文档更新 | ✅ CHANGELOG / README / ARCHITECTURE |
-
-**验证总数：单元+集成 31 + 登录 6 + 组合 11 + soak 8 轮 = 56 项**
-
----
-
-## 深度自检发现的真实缺陷（已全部修复）
-
-| # | 缺陷 | 严重级别 | 证据 | 修复 |
-|---|------|---------|------|------|
-| 1 | `abort()` 在导航阶段完全无效，run() 假成功 | HIGH | 实测：abort 后仍正常抓取并返回成功 | 多阶段检查点 + 可中断等待 |
-| 2 | `_abortPromise` 定时器链永久自我续期 | HIGH | 实测：run() 完成后残留活跃 Timeout | stop() 显式清理，现 0 残留 |
-| 3 | `executablePath` 可从渲染层直传 spawn 任意 exe | HIGH | 代码审查：无白名单校验 | `isTrustedExecutable()` 白名单（chrome/edge/brave/chromium） |
-| 4 | HAR `receive` 恒为 0，`send` 承载 TTFB | MEDIUM | 代码审查与规范对比 | 按 HAR 1.2 语义重算（send/wait/receive + time=sum） |
-| 5 | 同名资源互相覆盖（`a.js?v=1` vs `?v=2`） | MEDIUM | 单测暴露 | 附短 hash 消歧 |
-| 6 | 解压失败残留半成品文件 | MEDIUM | 代码审查 | 失败时清理 installDir |
-| 7 | 写盘非原子（崩溃留半截文件） | MEDIUM | 代码审查 | `writeFileAtomic` / `writeBufferAtomic` |
-| 8 | 浏览器断连被静默忽略（假成功） | HIGH | 代码审查 | `_connectionLost` + 结果标记 |
-
-**测试数量：19（基线）→ 37（单元+集成）+ 6（登录 E2E）+ 11（组合 E2E）= 54 项**
-
----
-
-## T11 发布（已完成）
-
-| 项 | 值 |
-|----|-----|
-| 提交 | `a850481` feat(v1.1.0) |
-| 分支 | main（已推送） |
-| Tag | `v1.1.0` |
-| Release | https://github.com/lza6/Get-source-code/releases/tag/v1.1.0 |
-| 附件 1 | `GetSourceCode-1.1.0-portable.exe` (106MB) ✓ uploaded |
-| 附件 2 | `GetSourceCode.Setup.1.1.0.exe` (106MB) ✓ uploaded |
-
-## 剩余任务
-
-- T2/T3/T10 研究代理仍在运行（超时未返回），其价值已由**自审替代**：本轮自审发现并修复了 8 个真实缺陷
-- T12 主线：用本工具抓取目标站点（进行中）
+详见 `计划书/下一步改进指南.md`：S1 HAR 完整化（WS 帧）/ S2 sourcemap 还原 /
+S3 依赖图 / S4 接口清单 / S5 站点镜像 / S6 任务系统 / C2 纯协议求解。

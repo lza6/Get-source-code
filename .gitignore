@@ -43,3 +43,10 @@ test/bench-report.json
 test/soak-report.json
 
 test/edge-report.json
+
+# 覆盖率
+coverage/
+.c8_output/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

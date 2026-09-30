@@ -8,6 +8,9 @@
 
 const pkg = require("../../package.json");
 
+/** 内联进 HAR 的响应体上限（超过则只记元数据 + 磁盘路径，避免 .har 膨胀到 GB 级） */
+const MAX_INLINE_BODY = 1024 * 1024;
+
 class HarBuilder {
   constructor() {
     this.entries = [];
@@ -151,6 +154,46 @@ class HarBuilder {
     };
     // HAR 1.2：entry.time 应等于各非 -1 timing 之和
     e.time = send + wait + receive;
+  }
+
+  /**
+   * 记录该请求的响应体在磁盘上的相对路径（用于大 body 不内联时指向文件）
+   * @param {string} requestId
+   * @param {string} relPath 相对 outputDir 的路径（正斜杠）
+   */
+  setSavedFile(requestId, relPath) {
+    const e = this._byId.get(requestId);
+    if (e) e._savedFile = relPath;
+  }
+
+  /**
+   * 把响应体挂到对应 HAR entry 的 response.content 上。
+   *
+   * HAR 1.2 规范中 `content.text` 承载响应体；此前实现只写 size/mimeType，
+   * 导致导出的 .har 在 DevTools / Charles / Postman 中「有请求无内容」。
+   *
+   * 体积保护：超过 MAX_INLINE_BODY 的 body 不内联（否则 .har 可达 GB 级且加载卡死），
+   * 改为写 `_bodyOmitted` + `_bodyFile`（非标准扩展字段，标准客户端会忽略）。
+   *
+   * @param {string} requestId
+   * @param {object} p
+   * @param {string} p.text      响应体（base64 编码时传原始 base64 串）
+   * @param {string} [p.encoding] 仅二进制为 "base64"
+   * @param {string} p.mimeType
+   * @param {number} p.size      解码后的字节数
+   */
+  attachBody(requestId, { text, encoding, mimeType, size }) {
+    const e = this._byId.get(requestId);
+    if (!e) return;
+    const content = { ...e.response.content, mimeType: mimeType || e.response.content.mimeType, size };
+
+    if (size > MAX_INLINE_BODY) {
+      e.response.content = { ...content, _bodyOmitted: true, _bodyFile: e._savedFile || null };
+      return;
+    }
+    e.response.content = encoding
+      ? { ...content, text, encoding }
+      : { ...content, text };
   }
 
   /** 产出 HAR 1.2 对象 */
