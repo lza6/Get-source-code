@@ -38,7 +38,56 @@
 | T5 | 压测 + 稳定性 | ✅ | — | 并发 3 → 100%；soak 6 轮零泄漏 |
 | T6 | 打包验证 | ✅ | `dist/*.exe` | NSIS + portable 各 107MB，含新模块 |
 | T7 | 文档三件套 | ✅ | CHANGELOG / README / 本文档 | — |
-| T8 | 提交 + 推送 + Release | 🔄 | — | 见下 |
+| T8 | 提交 + 推送 main | ✅ | — | `8f01dcd` → `origin/main` |
+| T9 | Tag + Release | ✅ | GitHub Release | https://github.com/lza6/Get-source-code/releases/tag/v1.2.0 |
+| T10 | Release 附件真实下载验证 | ✅ | — | SHA256 与本地一致、PE 头有效、**实际启动成功** |
+| T11 | CI 重复发布根因修复 | ✅ | `.github/workflows/build.yml` | 见下 |
+
+---
+
+## 发布过程发现并修复的问题（T11）
+
+**现象**：tag 推送后 CI 产生了**两个** v1.2.0 Release（一个 Draft、一个 Published），
+且 Published 中有重复安装包（`GetSourceCode-Setup-*.exe` 与 `GetSourceCode.Setup-*.exe` 同内容异名）。
+
+**根因**（来自 CI 日志原文）：
+```
+• Implicit publishing triggered by git tag. This behavior will be disabled
+  in electron-builder v27. Please use --publish explicitly.  tag=v1.2.0
+• publishing publisher=Github (owner: lza6, project: Get-source-code)   ← 出现两次
+• creating GitHub release reason=release doesn't exist tag=v1.2.0
+```
+`electron-builder` 检测到 git tag + `GH_TOKEN` 后**隐式发布**，与
+`softprops/action-gh-release` 形成**两个发布者**竞争 → 重复 Release 与重复附件。
+
+**修复**：
+1. `package.json` → `build` 加 `--publish never`，禁用隐式发布，使 Action 成为唯一发布者
+2. `build.yml` → Create Release 补传 `dist/latest.yml`（禁用隐式发布后该文件将丢失，影响自动更新）
+3. `build.yml` → **移除 `continue-on-error: true`**（此前 JS 语法错误无法被 CI 捕获）
+
+**验证**：本地 `npm run build` 日志中 `Implicit publishing` 与 `publishing` **均已消失**，构建正常产出。
+
+**线上清理**：删除 Draft Release、删除重复附件、按 v1.1.x 规范命名重新上传。
+
+---
+
+## Release 附件验证（T10，真实下载）
+
+| 验证项 | 方法 | 结果 |
+|--------|------|------|
+| 可下载 | `gh release download v1.2.0` | ✅ 107MB |
+| 完整性 | 下载包 SHA256 vs 本地产物 | ✅ **完全一致** |
+| 有效性 | PE 头校验 | ✅ `4d5a` (`MZ`) |
+| **可运行** | 实际启动 + CDP 探测 | ✅ UA 显示 `GetSourceCode/1.2.0 Electron/44.4.5` |
+| 功能存在 | 打包版 UI 检查 | ✅ `cf:true, cfGroup:true`（CF 开关与反爬分组均在） |
+
+**Release 最终附件**：
+```
+GetSourceCode-1.2.0-portable.exe          107MB
+GetSourceCode.Setup.1.2.0.exe             107MB
+GetSourceCode.Setup.1.2.0.exe.blockmap    115KB
+latest.yml                                355B
+```
 
 ---
 
