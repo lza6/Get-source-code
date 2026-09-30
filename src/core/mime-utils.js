@@ -130,33 +130,37 @@ function safeFileName(name, maxLen = 120) {
  *  源码: source/{host}/{path}
  *  媒体: media/{host}/{path}
  *  其它: other/{host}/{path}
- * 保留原始目录结构；无文件名时用 hash 生成
- * 带 query 的 URL 会附加短 hash，避免同名覆盖
+ *
+ * 默认**保留原始文件名**（逆向分析需要，如 `5142.8cc95d675e4959d0.js`）。
+ * 仅当调用方检测到路径冲突时，通过 `disambiguator` 传入短 hash 消歧。
+ *
+ * @param {string} url
+ * @param {{kind:string, ext:string, dir:string}} cls
+ * @param {string} baseUrl
+ * @param {string} [disambiguator] 冲突消歧后缀（如 "ab12cd"）
  */
-function buildLocalPath(url, cls, baseUrl) {
+function buildLocalPath(url, cls, baseUrl, disambiguator) {
   let u;
   try {
     u = new URL(url);
   } catch {
-    return path.join(cls.dir, "unknown", `unknown_${Date.now()}.${cls.ext}`);
+    const suffix = disambiguator ? `_${disambiguator}` : "";
+    return path.join(cls.dir, "unknown", `unknown_${Date.now()}${suffix}.${cls.ext}`);
   }
   const host = safeFileName(u.hostname);
   let segs = u.pathname.split("/").filter(Boolean).map((s) => safeFileName(decodeURIComponentSafe(s)));
   if (segs.length === 0) segs = ["index"];
   let last = segs[segs.length - 1];
   const hasExt = /\.[a-z0-9]{1,6}$/i.test(last);
-
-  // 有 query/fragment 时附加短 hash，避免“同名不同参”互相覆盖
-  const needDisambig = !!(u.search || u.hash);
-  const h = needDisambig ? shortHash(u.search + u.hash) : "";
+  const suffix = disambiguator ? `_${disambiguator}` : "";
 
   if (!hasExt) {
     // 无扩展名（目录型 / API）：补扩展名
-    last = h ? `${last}_${h}.${cls.ext}` : `${last}.${cls.ext}`;
-  } else if (h) {
-    // 有扩展名但带参数：file.js → file_ab12cd.js
+    last = `${last}${suffix}.${cls.ext}`;
+  } else if (suffix) {
+    // 有扩展名且需消歧：file.js → file_ab12cd.js
     const dot = last.lastIndexOf(".");
-    last = `${last.slice(0, dot)}_${h}${last.slice(dot)}`;
+    last = `${last.slice(0, dot)}${suffix}${last.slice(dot)}`;
   }
   segs[segs.length - 1] = last;
   return path.join(cls.dir, host, ...segs);

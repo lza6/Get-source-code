@@ -41,3 +41,5 @@ desktop.ini
 # 测试产物
 test/bench-report.json
 test/soak-report.json
+
+test/edge-report.json

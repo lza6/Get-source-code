@@ -224,10 +224,30 @@ ipcMain.handle("dialog:selectBrowser", async () => {
   return res.filePaths[0];
 });
 
-/** 用系统默认程序打开文件/目录 */
-ipcMain.handle("shell:openPath", async (_e, p) => {
-  if (!p) return false;
+/** 允许被打开的目录白名单（防任意路径被打开/执行） */
+const allowedOpenRoots = new Set();
+
+function isPathAllowed(p) {
+  if (!p || typeof p !== "string") return false;
+  let resolved;
   try {
+    resolved = path.resolve(p);
+  } catch {
+    return false;
+  }
+  for (const root of allowedOpenRoots) {
+    const rel = path.relative(root, resolved);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) return true;
+  }
+  return false;
+}
+
+/** 用系统默认程序打开文件/目录（仅限本次抓取产出目录） */
+ipcMain.handle("shell:openPath", async (_e, p) => {
+  if (!isPathAllowed(p)) return false;
+  try {
+    // 仅允许打开已存在路径
+    if (!fs.existsSync(p)) return false;
     await shell.openPath(p);
     return true;
   } catch {
@@ -235,9 +255,10 @@ ipcMain.handle("shell:openPath", async (_e, p) => {
   }
 });
 
-/** 在文件管理器中显示 */
+/** 在文件管理器中显示（仅限产出目录） */
 ipcMain.handle("shell:showInFolder", (_e, p) => {
-  if (p && fs.existsSync(p)) shell.showItemInFolder(p);
+  if (!isPathAllowed(p) || !fs.existsSync(p)) return false;
+  shell.showItemInFolder(p);
   return true;
 });
 
@@ -270,6 +291,11 @@ ipcMain.handle("capture:start", async (event, opts) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("browser:download", p);
       },
     });
+
+    // 注册产出目录到「允许打开」白名单
+    if (opts.outputDir) {
+      try { allowedOpenRoots.add(path.resolve(opts.outputDir)); } catch { /* ignore */ }
+    }
 
     // 2) 解析 profile
     profile = bm.resolveProfile({
@@ -329,8 +355,11 @@ ipcMain.handle("capture:shutdownBrowser", async () => {
   return { ok: false };
 });
 
-/** 读取目录树（用于结果展示） */
+/** 读取目录树（仅限产出目录，用于结果展示） */
 ipcMain.handle("fs:readTree", async (_e, dir) => {
+  // 允许读取产出目录；也允许用户显式选择的父目录（用于展示）
+  const ok = isPathAllowed(dir);
+  if (!ok) return { ok: false, error: "路径不在允许范围内" };
   try {
     return { ok: true, tree: readDirTree(dir, 0, 4) };
   } catch (err) {

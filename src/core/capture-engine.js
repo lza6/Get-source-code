@@ -12,7 +12,7 @@ const fs = require("fs");
 const path = require("path");
 const { CDPClient } = require("./cdp-client");
 const { BrowserLauncher } = require("./browser-launcher");
-const { MimeClassifier, safeFileName, buildLocalPath } = require("./mime-utils");
+const { MimeClassifier, safeFileName, buildLocalPath, shortHash } = require("./mime-utils");
 const { HarBuilder } = require("./har-builder");
 
 const DEFAULT_OPTS = {
@@ -193,6 +193,7 @@ class CaptureEngine {
       targetUrl,
       capturedAt: new Date().toISOString(),
       browser: version.Browser,
+      connectionLost: this._connectionLost,
       stats: this.stats,
       resources: this.resources,
       tree: buildTree(this.resources, outputDir),
@@ -317,7 +318,7 @@ class CaptureEngine {
       const isBase64 = body.base64Encoded;
       const buf = isBase64 ? Buffer.from(body.body, "base64") : Buffer.from(body.body, "utf8");
 
-      const rel = buildLocalPath(url, cls, this.opts.targetUrl);
+      const rel = this._resolveLocalPath(url, cls);
       const abs = path.join(this.opts.outputDir, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       writeBufferAtomic(abs, buf);
@@ -335,10 +336,19 @@ class CaptureEngine {
       });
       this._emit("file", { kind: cls.kind, url, size: buf.length, path: abs });
     } catch (e) {
-      this.stats.failed++;
-      this.resources.push({ url, kind: cls.kind, status: "failed", error: e.message });
-      // 常见原因：body 已被浏览器释放 / 跨域 opaque 响应
-      this._emit("skip", { url, reason: e.message.slice(0, 80) });
+      const msg = e.message || String(e);
+      // 区分「可忽略」与「真失败」：
+      //  - 响应体已被浏览器释放（-32000 No data found）常见于预取/上报请求，属正常
+      //  - 其它错误才计为 failed
+      const ignorable = /No data found|No resource with given identifier|-32000/i.test(msg);
+      if (ignorable) {
+        this.stats.skipped++;
+        this.resources.push({ url, kind: cls.kind, status: "skipped", reason: "body-released" });
+      } else {
+        this.stats.failed++;
+        this.resources.push({ url, kind: cls.kind, status: "failed", error: msg });
+      }
+      this._emit("skip", { url, reason: msg.slice(0, 80) });
     }
   }
 
@@ -350,6 +360,30 @@ class CaptureEngine {
       case "other": return this.opts.saveSource; // 其它静态文本（json/txt/xml）随源码一起
       default: return false;
     }
+  }
+
+  /**
+   * 解析本地相对路径：默认保留原始文件名；
+   * 仅当同一路径已被**不同 URL**占用时，附加短 hash 消歧。
+   * 这样既保持 `5142.xxx.js` 这样的原名（逆向友好），又避免 `?v=1`/`?v=2` 互相覆盖。
+   */
+  _resolveLocalPath(url, cls) {
+    const primary = buildLocalPath(url, cls, this.opts.targetUrl);
+    if (!this._pathOwner) this._pathOwner = new Map(); // rel -> url
+
+    const owner = this._pathOwner.get(primary);
+    if (owner === undefined) {
+      this._pathOwner.set(primary, url);
+      return primary;
+    }
+    if (owner === url) {
+      return primary; // 同一 URL 重复请求，覆盖即可
+    }
+    // 冲突：附加 URL 的短 hash
+    const h = shortHash(url);
+    const disambig = buildLocalPath(url, cls, this.opts.targetUrl, h);
+    this._pathOwner.set(disambig, url);
+    return disambig;
   }
 
   /** 保存渲染后的完整 DOM */

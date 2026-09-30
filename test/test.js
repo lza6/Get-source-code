@@ -89,11 +89,21 @@ test("非法字符被清理", () => {
   assert.ok(!/[<>:"|?*]/.test(n), `不应含非法字符: ${n}`);
 });
 
-test("同名不同 query 不冲突", () => {
+test("同名不同 query 不冲突（默认保留原名）", () => {
   const cls = MimeClassifier.classify("https://x.com/a.js", "application/javascript", "Script");
+  // 默认：保留原名
   const p1 = buildLocalPath("https://x.com/a.js?v=1", cls, "");
-  const p2 = buildLocalPath("https://x.com/a.js?v=2", cls, "");
-  assert.notStrictEqual(p1, p2, "不同 query 应产出不同路径");
+  assert.ok(p1.endsWith("a.js"), `默认应保留原名，实际: ${p1}`);
+  // 显式冲突消歧
+  const p2 = buildLocalPath("https://x.com/a.js?v=2", cls, "", "ab12cd");
+  assert.notStrictEqual(p1, p2, "消歧后应不同");
+  assert.ok(p2.includes("a_ab12cd.js"), `消歧格式应正确: ${p2}`);
+});
+
+test("带 hash 的原始 chunk 名被完整保留（逆向友好）", () => {
+  const cls = MimeClassifier.classify("https://x.com/_next/static/chunks/5142.8cc95d675e4959d0.js?_rsc=abc", "application/javascript", "Script");
+  const p = buildLocalPath("https://x.com/_next/static/chunks/5142.8cc95d675e4959d0.js?_rsc=abc", cls, "");
+  assert.ok(p.endsWith("5142.8cc95d675e4959d0.js"), `应保留原始 chunk 名，实际: ${p}`);
 });
 
 test("HAR timings 语义正确（wait=TTFB, receive>0, time=sum）", () => {
