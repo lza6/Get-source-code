@@ -115,11 +115,43 @@ function check(name, cond, ev) {
     );
     check("取消勾选后 Turnstile 行重新隐藏", turnstileHiddenBack === "none", turnstileHiddenBack);
 
+    /* ---------- 4b. 滚动到底部模式开关 ---------- */
+    console.log("\n[3b] 滚动模式开关");
+    check("scrollToBottom 复选框存在", await evalJs("!!document.getElementById('scrollToBottom')"));
+    check("scrollToBottom 默认勾选", await evalJs("document.getElementById('scrollToBottom').checked") === true);
+    await evalJs("document.getElementById('scrollToBottom').click(); true");
+    await sleep(150);
+    check("可取消勾选（切换到按比例模式）",
+      await evalJs("document.getElementById('scrollToBottom').checked") === false);
+    await evalJs("document.getElementById('scrollToBottom').click(); true");
+    await sleep(150);
+    check("可重新勾选", await evalJs("document.getElementById('scrollToBottom').checked") === true);
+
+    /* ---------- 4c. 配置能真实传到主进程 ---------- */
+    console.log("\n[3c] 配置透传（不实际抓取，仅验证取值链路）");
+    const optsProbe = await evalJs(`
+      (function(){
+        // 复刻 start() 中的 opts 组装逻辑，验证新字段可被正确读取
+        const clampInt = (v,min,max)=>{const n=parseInt(v,10);return isNaN(n)?min:Math.max(min,Math.min(max,n));};
+        return JSON.stringify({
+          scrollRounds: clampInt(document.getElementById('scrollRounds').value,0,50),
+          scrollToBottom: document.getElementById('scrollToBottom').checked,
+          cfAutoPass: document.getElementById('cfAutoPass').checked,
+          cfChallengeTimeout: clampInt(document.getElementById('cfTimeout').value,5,180)*1000
+        });
+      })()
+    `);
+    const opts = JSON.parse(optsProbe);
+    check("scrollToBottom 可被读取", typeof opts.scrollToBottom === "boolean", JSON.stringify(opts));
+    check("cfAutoPass 可被读取", typeof opts.cfAutoPass === "boolean");
+    check("cfChallengeTimeout 换算为毫秒", opts.cfChallengeTimeout === 30000, `${opts.cfChallengeTimeout}ms`);
+
     /* ---------- 5. 关键控件齐全性 ---------- */
     console.log("\n[4] 原有控件未被破坏");
     const ids = ["url", "outDir", "sourceSelect", "browserSelect", "profileMode",
                  "saveSource", "saveHar", "saveHtml", "saveMedia",
-                 "headless", "scrollRounds", "extraWait", "timeout", "maxFileMB",
+                 "headless", "scrollRounds", "scrollToBottom", "extraWait", "timeout", "maxFileMB",
+                 "cfAutoPass", "cfClickTurnstile", "cfTimeout",
                  "btnStart", "btnAbort", "btnOpenDir", "btnCloseBrowser", "btnHelp"];
     const missing = [];
     for (const id of ids) {

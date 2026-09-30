@@ -295,6 +295,7 @@ async function start() {
     saveHtml: $("saveHtml").checked,
     saveMedia: $("saveMedia").checked,
     scrollRounds: clampInt($("scrollRounds").value, 0, 50),
+    scrollToBottom: $("scrollToBottom").checked,
     extraWait: clampInt($("extraWait").value, 0, 120) * 1000,
     timeout: clampInt($("timeout").value, 5, 600) * 1000,
     maxResourceSize: clampInt($("maxFileMB").value, 1, 2048) * 1024 * 1024,

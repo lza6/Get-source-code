@@ -21,8 +21,10 @@ const DEFAULT_OPTS = {
   headless: true,
   timeout: 45000,
   idleWait: 2500,          // 网络空闲后再等多久
-  scrollRounds: 0,         // 滚动次数（触发懒加载）
+  scrollRounds: 0,         // 滚动次数（触发懒加载），语义为「最多轮次」
   scrollDelay: 1200,
+  scrollToBottom: true,    // true=每轮推进到页面底部（适合无限滚动）；false=按比例推进
+  scrollStepDelay: 120,    // 分步滚动时每步之间的停顿（让 IntersectionObserver 有机会触发）
   saveSource: true,        // JS/CSS/字体
   saveMedia: false,        // 图片/视频/音频
   saveHtml: true,          // 渲染后的 DOM
@@ -446,9 +448,16 @@ class CaptureEngine {
       this.resources.push({ url: this.opts.targetUrl, kind: "html", size: Buffer.byteLength(html), file: "page.html", status: 200 });
       this._emit("file", { kind: "html", size: html.length, path: file });
 
-      // 同时保存标题等元信息
+      // 同时保存标题等元信息（含 DOM 资源计数，便于核对懒加载是否真的触发）
       const info = await this.cdp.send("Runtime.evaluate", {
-        expression: "JSON.stringify({title:document.title,url:location.href,readyState:document.readyState})",
+        expression: `JSON.stringify({
+          title: document.title,
+          url: location.href,
+          readyState: document.readyState,
+          images: document.images ? document.images.length : 0,
+          scripts: document.scripts ? document.scripts.length : 0,
+          loaded: (typeof window.__loadedCount === "number" ? window.__loadedCount : null)
+        })`,
         returnByValue: true,
       }, { sessionId: this.sessionId }).catch(() => null);
       if (info?.result?.value) {
@@ -491,10 +500,15 @@ class CaptureEngine {
    *
    * 原实现按预设轮次"滚完就停"，对**无限滚动**页面（高度持续增长）会漏抓，
    * 对**短页面**又白白浪费轮次。现改为：
+   *   - 分步滚动（逐步逼近目标位置），让 IntersectionObserver / scroll 监听有机会触发；
    *   - 每轮滚动后测量 scrollHeight；
    *   - 高度连续 2 轮不变且已接近底部 → 提前结束；
    *   - 每轮后等待网络空闲（而非固定 delay），让新资源有时间加载。
    * `scrollRounds` 语义保持不变：**最多**滚动多少轮。
+   *
+   * `scrollToBottom`：
+   *   - true（默认）每轮把页面推到**底部** —— 适合无限滚动（每次到底触发追加）
+   *   - false       按比例推进（(i+1)/rounds）—— 适合固定高度、需要逐屏触发的页面
    *
    * ⚠️ 总时长预算：整个滚动阶段共享**一个** `timeout` 预算（而非每轮各吃满一个），
    * 否则最坏情况 = rounds × timeout（50 × 45s ≈ 37 分钟），静默违反超时契约。
@@ -504,16 +518,26 @@ class CaptureEngine {
     let stableRounds = 0;
     const deadline = Date.now() + this.opts.timeout;
     const remaining = () => deadline - Date.now();
+    const toBottom = this.opts.scrollToBottom !== false;
+    const stepDelay = this.opts.scrollStepDelay || 120;
 
     for (let i = 0; i < rounds; i++) {
       if (this._aborted || remaining() <= 0) return;
 
+      // 目标位置：到底 or 按比例
+      const target = toBottom ? "bottom" : String((i + 1) / rounds);
+
+      // 分步推进（每步不超过视口高度），给懒加载观察器触发机会
+      await this._scrollStepwise(target, stepDelay);
+      if (this._aborted || remaining() <= 0) return;
+
+      // 读取当前高度与位置
       const r = await this.cdp.send("Runtime.evaluate", {
-        expression: `(function(){
-          const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-          window.scrollTo(0, h);
-          return JSON.stringify({ h, y: window.scrollY, vh: window.innerHeight });
-        })()`,
+        expression: `JSON.stringify({
+          h: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+          y: window.scrollY,
+          vh: window.innerHeight
+        })`,
         returnByValue: true,
       }, { sessionId: this.sessionId, timeout: Math.min(15000, Math.max(2000, remaining())) }).catch(() => null);
 
@@ -541,6 +565,47 @@ class CaptureEngine {
 
     // 回到顶部
     await this.cdp.send("Runtime.evaluate", { expression: "window.scrollTo(0,0)" }, { sessionId: this.sessionId }).catch(() => {});
+  }
+
+  /**
+   * 分步滚动到目标位置。
+   *
+   * 为什么分步：`window.scrollTo(0, 极大值)` 会**瞬间跳过**中间区域，
+   * 依赖 IntersectionObserver 的懒加载实现可能因此不触发。
+   * 分步（每步 ≤ 一屏）更接近真实用户滚动，触发率显著更高。
+   *
+   * @param {string} target "bottom" 或 "0"~"1" 的比例字符串
+   * @param {number} stepDelay 每步停顿
+   */
+  async _scrollStepwise(target, stepDelay) {
+    const expr = `(function(){
+      const doc = document.documentElement, body = document.body;
+      const max = Math.max(body.scrollHeight, doc.scrollHeight) - window.innerHeight;
+      const want = ${target === "bottom" ? "max" : `max * ${target}`};
+      const step = Math.max(200, Math.floor(window.innerHeight * 0.8));
+      const cur = window.scrollY;
+      const next = want > cur ? Math.min(want, cur + step) : want;
+      window.scrollTo(0, Math.max(0, next));
+      return JSON.stringify({ cur, next: window.scrollY, want });
+    })()`;
+
+    // 最多迭代若干步，避免极端页面耗时过久
+    for (let s = 0; s < 12; s++) {
+      if (this._aborted) return;
+      let done = true;
+      try {
+        const r = await this.cdp.send("Runtime.evaluate", {
+          expression: expr, returnByValue: true,
+        }, { sessionId: this.sessionId, timeout: 5000 });
+        const v = JSON.parse((r && r.result && r.result.value) || "{}");
+        // 还差得远就继续走
+        done = Math.abs((v.want || 0) - (v.next || 0)) < 8;
+      } catch {
+        return; // 单步失败即放弃分步，交由外层读取高度
+      }
+      if (done) return;
+      await this._sleepInterruptible(stepDelay);
+    }
   }
 
   /**

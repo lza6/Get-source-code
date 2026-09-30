@@ -127,7 +127,10 @@
           <label class="field-sm"><span>超时(秒)</span><input type="number" id="timeout" value="45" min="5" max="600" /></label>
           <label class="field-sm"><span>单文件上限(MB)</span><input type="number" id="maxFileMB" value="50" min="1" max="2048" /></label>
         </div>
-        <p class="hint">滚动次数 &gt; 0 可触发懒加载内容（如瀑布流、无限滚动）。慢站点可增大「额外等待」。</p>
+        <label class="check inline" style="margin-top:8px">
+          <input type="checkbox" id="scrollToBottom" checked /><span>滚动到底部模式 <small>适合无限滚动；取消则按比例逐屏推进</small></span>
+        </label>
+        <p class="hint">滚动次数 &gt; 0 可触发懒加载内容（如瀑布流、无限滚动）。工具会自动检测页面高度是否停止增长并提前结束。慢站点可增大「额外等待」。</p>
       </fieldset>
 
       <div class="actions">

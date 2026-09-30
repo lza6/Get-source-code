@@ -138,6 +138,24 @@ test("_scrollPage 共享总时长预算（不因轮次叠加放大）", () => {
     "_waitNetworkIdle 未接收剩余预算 —— 最坏情况会退化为 rounds × timeout");
 });
 
+test("_scrollPage 支持 scrollToBottom 模式开关", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  assert.ok(/scrollToBottom/.test(src), "缺少 scrollToBottom 选项");
+  assert.ok(/scrollToBottom: true/.test(src), "scrollToBottom 默认值应为 true");
+});
+
+test("滚动采用分步推进（避免瞬间跳到底部导致懒加载不触发）", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "src", "core", "capture-engine.js"), "utf8"
+  );
+  const body = src.slice(src.indexOf("async _scrollStepwise"), src.indexOf("async _handleChallenge"));
+  assert.ok(/step/.test(body) && /scrollTo/.test(body), "_scrollStepwise 未实现分步滚动");
+  // 每步不应一次到底：应基于 innerHeight 计算步长
+  assert.ok(/innerHeight/.test(body), "步长未基于视口高度计算");
+});
+
 test("close() 使挂起者失败，不产生悬挂 Promise", async () => {
   const c = new CDPClient("ws://unused", {});
   c._ws = { close: () => {} };
